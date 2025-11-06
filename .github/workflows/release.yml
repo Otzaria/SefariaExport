@@ -1,12 +1,8 @@
-name: Python 3.9 + MongoDB + Sefaria Export (Manual, fast aria2c)
+name: Python 3.9 + MongoDB + Sefaria Export (Matrix, fast aria2c)
 
 on:
   workflow_dispatch:
     inputs:
-      export_function:
-        description: "Which export to run (export_all, export_texts, export_all_merged, export_links, export_schemas, export_toc, export_topic_graph)"
-        required: false
-        default: "export_all"
       timezone:
         description: "Timezone for timestamp/tag (IANA name)"
         required: false
@@ -15,9 +11,36 @@ on:
 permissions:
   contents: write
 
+env:
+  TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
+  DJANGO_SETTINGS_MODULE: sefaria.settings
+  MONGO_HOST: 127.0.0.1
+  MONGO_PORT: 27017
+  MONGO_DB_NAME: sefaria
+  SEFARIA_EXPORT_BASE: ${{ github.workspace }}/exports
+
 jobs:
-  export:
+  prep:
+    name: Compute timestamp
     runs-on: ubuntu-latest
+    outputs:
+      stamp: ${{ steps.ts.outputs.stamp }}
+    steps:
+      - name: Compute release timestamp
+        id: ts
+        run: |
+          TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M' > ts.txt
+          echo "stamp=$(cat ts.txt)" >> $GITHUB_OUTPUT
+
+  export:
+    name: Run ${{ matrix.export_function }}
+    runs-on: ubuntu-latest
+    needs: prep
+
+    strategy:
+      fail-fast: false
+      matrix:
+        export_function: [export_all_merged, export_links, export_schemas, export_toc]
 
     services:
       mongodb:
@@ -31,13 +54,9 @@ jobs:
           --health-retries=20
 
     env:
-      EXPORT_FUNCTION: ${{ inputs.export_function || 'export_all' }}
-      TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
-      DJANGO_SETTINGS_MODULE: sefaria.settings
-      SEFARIA_EXPORT_PATH: ${{ github.workspace }}/exports
-      MONGO_HOST: 127.0.0.1
-      MONGO_PORT: 27017
-      MONGO_DB_NAME: sefaria
+      EXPORT_FUNCTION: ${{ matrix.export_function }}
+      SEFARIA_EXPORT_PATH: ${{ env.SEFARIA_EXPORT_BASE }}/${{ matrix.export_function }}
+      TS_STAMP: ${{ needs.prep.outputs.stamp }}
 
     steps:
       - name: Checkout (this repository)
@@ -110,18 +129,17 @@ jobs:
       - name: Create minimal local_settings.py for CI (sets SEFARIA_DB!)
         working-directory: Sefaria-Project/sefaria
         run: |
+          mkdir -p "$SEFARIA_EXPORT_PATH"
           cp local_settings_example.py local_settings.py
           python - <<'PY'
           import os, re
           p = "local_settings.py"
           with open(p, "r", encoding="utf-8") as f:
               s = f.read()
-          # Ensure export path and Mongo connection
           s = re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
           s = re.sub(r"MONGO_HOST\s*=.*", f'MONGO_HOST = "{os.environ["MONGO_HOST"]}"', s)
           s = re.sub(r"MONGO_PORT\s*=.*", f'MONGO_PORT = {int(os.environ["MONGO_PORT"])}', s)
           s = re.sub(r"MONGO_DB_NAME\s*=.*", f'MONGO_DB_NAME = "{os.environ["MONGO_DB_NAME"]}"', s)
-          # Critical: make sure SEFARIA_DB is defined and matches the restored DB
           if re.search(r"SEFARIA_DB\s*=", s):
               s = re.sub(r"SEFARIA_DB\s*=.*", 'SEFARIA_DB = "sefaria"', s)
           else:
@@ -150,16 +168,9 @@ jobs:
 
       - name: Restore database from dump_small (detect correct dir) + create empty history
         run: |
-          # Find the folder that directly contains the 'sefaria' DB dump
-          # Common layouts: mongo_dump/dump/sefaria or mongo_dump/sefaria
-          DUMP_DIR="$( \
-            if [ -d mongo_dump/dump/sefaria ]; then echo mongo_dump/dump; \
-            elif [ -d mongo_dump/sefaria ]; then echo mongo_dump; \
-            else echo mongo_dump; fi )"
+          DUMP_DIR="$( if [ -d mongo_dump/dump/sefaria ]; then echo mongo_dump/dump; elif [ -d mongo_dump/sefaria ]; then echo mongo_dump; else echo mongo_dump; fi )"
           echo "Using dump dir: $DUMP_DIR"
-          # Restore only the 'sefaria' database from that directory
           mongorestore --host 127.0.0.1 --port 27017 --drop --db sefaria "$DUMP_DIR/sefaria"
-          # Create empty 'history' collection (dump_small requires it)
           python - <<'PY'
           from pymongo import MongoClient, errors
           client = MongoClient("mongodb://127.0.0.1:27017")
@@ -171,8 +182,6 @@ jobs:
               print("'history' collection already exists.")
           PY
           echo "✅ Mongo restore complete."
-
-          # Cleanup downloaded dump to free space
           echo "🧹 Cleaning up downloaded dump..."
           rm -rf dump_small.tar.gz mongo_dump
           echo "✅ Mongo restore complete and dump cleaned."
@@ -183,7 +192,7 @@ jobs:
           sudo rm -rf ~/.cache/pip || true
           df -h
 
-      - name: Run export function
+      - name: Run export function ${{ env.EXPORT_FUNCTION }}
         working-directory: Sefaria-Project
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
@@ -197,18 +206,15 @@ jobs:
           os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_PATH"))
           django.setup()
           from sefaria import export as ex
-          fn = os.environ.get("EXPORT_FUNCTION", "export_all").strip()
+          fn = os.environ.get("EXPORT_FUNCTION", "").strip()
           allowed = {
-            "export_all": ex.export_all,
-            "export_texts": ex.export_texts,
             "export_all_merged": ex.export_all_merged,
             "export_links": ex.export_links,
             "export_schemas": ex.export_schemas,
             "export_toc": ex.export_toc,
-            "export_topic_graph": ex.export_topic_graph,
           }
           if fn not in allowed:
-              raise SystemExit(f"Unknown export function: {fn}")
+              raise SystemExit(f"Unknown/disabled export function: {fn}")
           allowed[fn]()
           print(f"✅ {fn} completed successfully.")
           PY
@@ -226,61 +232,66 @@ jobs:
           echo "Disk usage after cleanup:"
           df -h
 
-      - name: Compute release timestamp
-        id: ts
-        run: |
-          TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M' > ts.txt
-          echo "stamp=$(cat ts.txt)" >> $GITHUB_OUTPUT
-
-      # ===== Split ZIP + multi-file release upload =====
-
       - name: Zip exports (split into ≤1.9GB parts)
         id: zip
         run: |
-          cd "$(dirname "$SEFARIA_EXPORT_PATH")"
-          ZIP_BASE="sefaria-exports-${{ steps.ts.outputs.stamp }}"
-          # -s 1900m => creates ZIP_BASE.zip + ZIP_BASE.z01, .z02, ...
-          zip -r -s 1900m "${ZIP_BASE}.zip" "$(basename "$SEFARIA_EXPORT_PATH")"
+          cd "$SEFARIA_EXPORT_BASE"
+          ZIP_BASE="sefaria-${{ matrix.export_function }}-${TS_STAMP}"
+          zip -r -s 1900m "${ZIP_BASE}.zip" "${{ matrix.export_function }}"
           echo "ZIP_DIR=$(pwd)" >> $GITHUB_ENV
           echo "ZIP_BASE=${ZIP_BASE}" >> $GITHUB_ENV
-          # List parts for debugging
           ls -1 "$(pwd)/${ZIP_BASE}.zip" "$(pwd)/${ZIP_BASE}".z* 2>/dev/null | sort -V || true
           echo "zip_name=${ZIP_BASE}.zip" >> $GITHUB_OUTPUT
 
-      - name: Upload split parts as artifact (optional)
+      - name: Upload split parts as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.zip.outputs.zip_name }}
+          name: ${{ matrix.export_function }}-${{ env.TS_STAMP }}
           path: |
             ${{ env.ZIP_DIR }}/${{ env.ZIP_BASE }}.zip
             ${{ env.ZIP_DIR }}/${{ env.ZIP_BASE }}.z*
 
+  release:
+    name: Create GitHub Release (attach all zips)
+    runs-on: ubuntu-latest
+    needs: [prep, export]
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloads
+
       - name: Collect parts list for release
         id: parts
         run: |
-          cd "${ZIP_DIR}"
+          cd downloads
           {
             echo 'files<<EOF'
-            ls -1 "${ZIP_BASE}.zip" "${ZIP_BASE}".z* 2>/dev/null | sort -V | sed "s#^#${ZIP_DIR}/#"
+            # list all .zip and .z* parts
+            find "$(pwd)" -type f \( -name '*.zip' -o -name '*.z*' \) | sort -V
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
           echo "Parts to upload:"
-          ls -1 "${ZIP_BASE}.zip" "${ZIP_BASE}".z* 2>/dev/null | sort -V || true
+          find "$(pwd)" -type f \( -name '*.zip' -o -name '*.z*' \) | sort -V
 
       - name: Create GitHub Release with all parts
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ts.outputs.stamp }}
-          name: ${{ steps.ts.outputs.stamp }}
+          tag_name: ${{ needs.prep.outputs.stamp }}
+          name: ${{ needs.prep.outputs.stamp }}
           files: ${{ steps.parts.outputs.files }}
-          overwrite_files: false
           body: |
-            Automated Sefaria export (${{ env.EXPORT_FUNCTION }}) generated at ${{ env.TZ_NAME }} time: ${{ steps.ts.outputs.stamp }}.
+            Automated Sefaria exports generated at ${{ env.TZ_NAME }} time: ${{ needs.prep.outputs.stamp }}.
 
-            This release uses a split ZIP. Download all files (.zip and any .z01, .z02, ...).
-            To extract:
-              - Keep all parts in the same folder.
-              - macOS/Linux: unzip ${{ env.ZIP_BASE }}.zip
-              - Windows (Explorer/7-Zip): open ${{ env.ZIP_BASE }}.zip with all parts present.
+            Included exports (each as its own ZIP, possibly split):
+              - export_all_merged
+              - export_links
+              - export_schemas
+              - export_toc
+
+            To extract split archives:
+              - Keep all parts (.zip and .z01, .z02, ...) in the same folder.
+              - macOS/Linux: unzip <name>.zip
+              - Windows (Explorer/7-Zip): open <name>.zip with all parts present.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
