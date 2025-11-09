@@ -91,11 +91,6 @@ jobs:
       SEFARIA_EXPORT_PATH: ${{ github.workspace }}/exports/export_links
 
     steps:
-      - name: Checkout (this repository)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
 
       - name: Set up Python 3.9
         uses: actions/setup-python@v5
@@ -262,22 +257,34 @@ jobs:
           echo "Disk usage after cleanup:"
           df -h
 
-      - name: Commit and push export_links to main
+      - name: Commit and force-push export_links to main (sparse)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B main origin/main || git checkout main
-          git pull --rebase origin main || true
-          mkdir -p exports
+          REPO_DIR="$RUNNER_TEMP/pushrepo"
+          rm -rf "$REPO_DIR" && mkdir -p "$REPO_DIR"
+          git -C "$REPO_DIR" init
+          git -C "$REPO_DIR" config user.name "github-actions[bot]"
+          git -C "$REPO_DIR" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$REPO_DIR" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git -C "$REPO_DIR" sparse-checkout init --cone
+          git -C "$REPO_DIR" sparse-checkout set exports
+          if git -C "$REPO_DIR" fetch --depth=1 origin main; then
+            git -C "$REPO_DIR" checkout -B main origin/main
+          else
+            git -C "$REPO_DIR" checkout --orphan main
+          fi
+          mkdir -p "$REPO_DIR/exports/export_links"
+          rm -rf "$REPO_DIR/exports/export_links"/* || true
+          cp -a "$SEFARIA_EXPORT_PATH"/. "$REPO_DIR/exports/export_links/"
+          cd "$REPO_DIR"
           git add -A exports/export_links
           if git diff --cached --quiet; then
             echo "No changes in exports/export_links; skipping commit."
           else
             git commit -m "chore(export): update export_links at ${TS_STAMP} [skip ci]"
-            git push origin HEAD:main
+            git push --force origin HEAD:main
           fi
 
   export_schemas:
@@ -303,11 +310,6 @@ jobs:
       SEFARIA_EXPORT_PATH: ${{ github.workspace }}/exports/export_schemas
 
     steps:
-      - name: Checkout (this repository)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
 
       - name: Set up Python 3.9
         uses: actions/setup-python@v5
@@ -474,22 +476,34 @@ jobs:
           echo "Disk usage after cleanup:"
           df -h
 
-      - name: Commit and push export_schemas to main
+      - name: Commit and force-push export_schemas to main (sparse)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B main origin/main || git checkout main
-          git pull --rebase origin main || true
-          mkdir -p exports
+          REPO_DIR="$RUNNER_TEMP/pushrepo"
+          rm -rf "$REPO_DIR" && mkdir -p "$REPO_DIR"
+          git -C "$REPO_DIR" init
+          git -C "$REPO_DIR" config user.name "github-actions[bot]"
+          git -C "$REPO_DIR" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$REPO_DIR" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git -C "$REPO_DIR" sparse-checkout init --cone
+          git -C "$REPO_DIR" sparse-checkout set exports
+          if git -C "$REPO_DIR" fetch --depth=1 origin main; then
+            git -C "$REPO_DIR" checkout -B main origin/main
+          else
+            git -C "$REPO_DIR" checkout --orphan main
+          fi
+          mkdir -p "$REPO_DIR/exports/export_schemas"
+          rm -rf "$REPO_DIR/exports/export_schemas"/* || true
+          cp -a "$SEFARIA_EXPORT_PATH"/. "$REPO_DIR/exports/export_schemas/"
+          cd "$REPO_DIR"
           git add -A exports/export_schemas
           if git diff --cached --quiet; then
             echo "No changes in exports/export_schemas; skipping commit."
           else
             git commit -m "chore(export): update export_schemas at ${TS_STAMP} [skip ci]"
-            git push origin HEAD:main
+            git push --force origin HEAD:main
           fi
 
   export_toc:
@@ -515,11 +529,6 @@ jobs:
       SEFARIA_EXPORT_PATH: ${{ github.workspace }}/exports/export_toc
 
     steps:
-      - name: Checkout (this repository)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
 
       - name: Set up Python 3.9
         uses: actions/setup-python@v5
@@ -686,22 +695,34 @@ jobs:
           echo "Disk usage after cleanup:"
           df -h
 
-      - name: Commit and push export_toc to main
+      - name: Commit and force-push export_toc to main (sparse)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B main origin/main || git checkout main
-          git pull --rebase origin main || true
-          mkdir -p exports
+          REPO_DIR="$RUNNER_TEMP/pushrepo"
+          rm -rf "$REPO_DIR" && mkdir -p "$REPO_DIR"
+          git -C "$REPO_DIR" init
+          git -C "$REPO_DIR" config user.name "github-actions[bot]"
+          git -C "$REPO_DIR" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$REPO_DIR" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git -C "$REPO_DIR" sparse-checkout init --cone
+          git -C "$REPO_DIR" sparse-checkout set exports
+          if git -C "$REPO_DIR" fetch --depth=1 origin main; then
+            git -C "$REPO_DIR" checkout -B main origin/main
+          else
+            git -C "$REPO_DIR" checkout --orphan main
+          fi
+          mkdir -p "$REPO_DIR/exports/export_toc"
+          rm -rf "$REPO_DIR/exports/export_toc"/* || true
+          cp -a "$SEFARIA_EXPORT_PATH"/. "$REPO_DIR/exports/export_toc/"
+          cd "$REPO_DIR"
           git add -A exports/export_toc
           if git diff --cached --quiet; then
             echo "No changes in exports/export_toc; skipping commit."
           else
             git commit -m "chore(export): update export_toc at ${TS_STAMP} [skip ci]"
-            git push origin HEAD:main
+            git push --force origin HEAD:main
           fi
 
   export_all_merged:
@@ -727,11 +748,6 @@ jobs:
       SEFARIA_EXPORT_PATH: ${{ github.workspace }}/exports/export_all_merged
 
     steps:
-      - name: Checkout (this repository)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
 
       - name: Set up Python 3.9
         uses: actions/setup-python@v5
@@ -898,20 +914,32 @@ jobs:
           echo "Disk usage after cleanup:"
           df -h
 
-      - name: Commit and push export_all_merged to main
+      - name: Commit and force-push export_all_merged to main (sparse)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B main origin/main || git checkout main
-          git pull --rebase origin main || true
-          mkdir -p exports
+          REPO_DIR="$RUNNER_TEMP/pushrepo"
+          rm -rf "$REPO_DIR" && mkdir -p "$REPO_DIR"
+          git -C "$REPO_DIR" init
+          git -C "$REPO_DIR" config user.name "github-actions[bot]"
+          git -C "$REPO_DIR" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$REPO_DIR" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git -C "$REPO_DIR" sparse-checkout init --cone
+          git -C "$REPO_DIR" sparse-checkout set exports
+          if git -C "$REPO_DIR" fetch --depth=1 origin main; then
+            git -C "$REPO_DIR" checkout -B main origin/main
+          else
+            git -C "$REPO_DIR" checkout --orphan main
+          fi
+          mkdir -p "$REPO_DIR/exports/export_all_merged"
+          rm -rf "$REPO_DIR/exports/export_all_merged"/* || true
+          cp -a "$SEFARIA_EXPORT_PATH"/. "$REPO_DIR/exports/export_all_merged/"
+          cd "$REPO_DIR"
           git add -A exports/export_all_merged
           if git diff --cached --quiet; then
             echo "No changes in exports/export_all_merged; skipping commit."
           else
             git commit -m "chore(export): update export_all_merged at ${TS_STAMP} [skip ci]"
-            git push origin HEAD:main
+            git push --force origin HEAD:main
           fi
