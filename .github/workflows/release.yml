@@ -1,11 +1,10 @@
-name: Sefaria Export (Self-hosted runner, Docker Mongo, export_all_merged)
+name: Sefaria Export (Self-hosted, venv, Docker Mongo)
 
 on:
   workflow_dispatch:
     inputs:
       timezone:
-        description: "Timezone (IANA name)"
-        required: false
+        description: "Timezone (IANA)"
         default: "Asia/Jerusalem"
 
 permissions:
@@ -17,27 +16,22 @@ env:
   MONGO_HOST: 127.0.0.1
   MONGO_PORT: 27017
   MONGO_DB_NAME: sefaria
-  PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
 
   prep:
-    name: Compute timestamp
     runs-on: [self-hosted, Linux, X64]
     outputs:
       stamp: ${{ steps.ts.outputs.stamp }}
     steps:
-      - name: Compute timestamp
-        id: ts
+      - id: ts
         run: |
           TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M' > ts.txt
           echo "stamp=$(cat ts.txt)" >> $GITHUB_OUTPUT
 
-
   export:
-    name: Run export_all_merged
-    needs: prep
     runs-on: [self-hosted, Linux, X64]
+    needs: prep
 
     env:
       TS_STAMP: ${{ needs.prep.outputs.stamp }}
@@ -46,11 +40,7 @@ jobs:
 
     steps:
 
-      # ---------------------------------------------------------
-      # Checkout only .github
-      # ---------------------------------------------------------
-      - name: Checkout .github only
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           ref: main
@@ -58,28 +48,30 @@ jobs:
             .github
           sparse-checkout-cone-mode: false
 
-      # ---------------------------------------------------------
-      # Install system dependencies (with sudo)
-      # ---------------------------------------------------------
-      - name: Install system packages
+      # --------------------------------------------------------
+      # Install system dependencies
+      # --------------------------------------------------------
+      - name: Install apt deps
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
-            python3 python3-pip python3-dev \
-            build-essential \
-            libre2-dev \
-            pybind11-dev \
-            cmake \
-            ninja-build \
-            libpq-dev \
-            pkg-config \
-            aria2 \
-            rsync \
-            wget curl git ca-certificates
+            python3 python3-pip python3-venv python3-dev \
+            build-essential libre2-dev pybind11-dev \
+            cmake ninja-build libpq-dev pkg-config \
+            aria2 rsync wget curl git ca-certificates
 
-      # ---------------------------------------------------------
-      # Install MongoDB Database Tools
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
+      # Create venv (PEP 668 FIX)
+      # --------------------------------------------------------
+      - name: Create Python venv
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          source "$RUNNER_TEMP/venv/bin/activate"
+          python3 -m pip install --upgrade pip setuptools wheel
+
+      # --------------------------------------------------------
+      # Install MongoDB Tools
+      # --------------------------------------------------------
       - name: Install MongoDB Tools
         run: |
           TOOLS="100.9.4"
@@ -88,37 +80,26 @@ jobs:
           sudo mv mongodb-database-tools-ubuntu2204-x86_64-${TOOLS}/bin/* /usr/local/bin/
           rm -rf mongodb-database-tools*
 
-      # ---------------------------------------------------------
-      # Clone Sefaria project
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
+      # Clone Sefaria
+      # --------------------------------------------------------
       - name: Clone Sefaria repo
         run: |
-          git clone --depth 1 https://github.com/Sefaria/Sefaria-Project.git
+          git clone --depth=1 https://github.com/Sefaria/Sefaria-Project.git
 
-      # ---------------------------------------------------------
-      # Fix requirements (ensure psycopg2, google-re2 compile)
-      # ---------------------------------------------------------
-      - name: Clean requirements for system build
+      # --------------------------------------------------------
+      # Install Python dependencies into venv
+      # --------------------------------------------------------
+      - name: Install Python deps (venv)
         working-directory: Sefaria-Project
         run: |
-          # Ensure psycopg2 is used (not psycopg2-binary)
-          sed -i 's/psycopg2-binary/psycopg2/g' requirements.txt || true
-          # Ensure google-re2 is not removed
-          echo "✅ requirements prepared for local build"
+          source "$RUNNER_TEMP/venv/bin/activate"
+          pip install --no-cache-dir -r requirements.txt
 
-      # ---------------------------------------------------------
-      # Install Python dependencies
-      # ---------------------------------------------------------
-      - name: Install Python dependencies
-        working-directory: Sefaria-Project
-        run: |
-          python3 -m pip install --upgrade pip setuptools wheel
-          pip3 install --no-cache-dir -r requirements.txt
-
-      # ---------------------------------------------------------
-      # Start MongoDB via Docker
-      # ---------------------------------------------------------
-      - name: Start MongoDB (Docker)
+      # --------------------------------------------------------
+      # Start MongoDB (Docker)
+      # --------------------------------------------------------
+      - name: Start MongoDB
         run: |
           docker rm -f sefaria-mongo >/dev/null 2>&1 || true
           docker run -d --name sefaria-mongo -p 27017:27017 mongo:6.0
@@ -127,17 +108,17 @@ jobs:
         run: |
           for i in {1..60}; do
             if (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1; then
-              echo "✅ MongoDB ready"
+              echo "✅ Mongo ready"
               exit 0
             fi
-            echo "⏳ Waiting MongoDB…"
+            echo "⏳ Waiting Mongo…"
             sleep 2
           done
           exit 1
 
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
       # Download Mongo dump
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
       - name: Download dump_small
         run: |
           mkdir -p mongo_dump
@@ -154,33 +135,30 @@ jobs:
             cp -a mongo_dump/sefaria mongo_dump_pkg/
           fi
 
-      # ---------------------------------------------------------
-      # Restore DB
-      # ---------------------------------------------------------
       - name: Restore DB
         run: |
           mongorestore --drop --db sefaria mongo_dump_pkg/sefaria
 
       - name: Ensure history collection
         run: |
+          source "$RUNNER_TEMP/venv/bin/activate"
           python3 - <<'PY'
           from pymongo import MongoClient
           c = MongoClient("mongodb://127.0.0.1:27017")
-          db = c["sefaria"]
-          try: db.create_collection("history")
+          try: c["sefaria"].create_collection("history")
           except: pass
-          print("✅ history collection ok")
+          print("✅ history ok")
           PY
 
-      # ---------------------------------------------------------
-      # Configure local_settings.py
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
+      # Configure settings
+      # --------------------------------------------------------
       - name: Configure local_settings.py
         working-directory: Sefaria-Project/sefaria
         run: |
           cp local_settings_example.py local_settings.py
           python3 - <<'PY'
-          import os,re
+          import os, re
           p="local_settings.py"
           s=open(p).read()
           s=re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
@@ -191,13 +169,14 @@ jobs:
           open(p,"w").write(s)
           PY
 
-      # ---------------------------------------------------------
-      # Run export_all_merged
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
+      # Run export_all_merged (inside venv)
+      # --------------------------------------------------------
       - name: Run export_all_merged
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
         run: |
+          source "$RUNNER_TEMP/venv/bin/activate"
           mkdir -p "$SEFARIA_EXPORT_PATH/export_all_merged"
           python3 - <<'PY'
           import os,sys,django
@@ -209,10 +188,10 @@ jobs:
           print("✅ export_all_merged completed")
           PY
 
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
       # Push branch
-      # ---------------------------------------------------------
-      - name: Push export branch
+      # --------------------------------------------------------
+      - name: Push exported branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -220,8 +199,7 @@ jobs:
           OUT="$SEFARIA_EXPORT_PATH/export_all_merged"
 
           TMP="$RUNNER_TEMP/pushrepo"
-          rm -rf "$TMP"
-          mkdir -p "$TMP"
+          rm -rf "$TMP" && mkdir -p "$TMP"
 
           git -C "$TMP" init
           git -C "$TMP" config user.name "github-actions[bot]"
@@ -239,11 +217,9 @@ jobs:
           git -C "$TMP" commit -m "Export at ${TS_STAMP}"
           git -C "$TMP" push --force origin HEAD:"$BRANCH"
 
-          echo "✅ Branch pushed: $BRANCH"
-
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
       # Cleanup
-      # ---------------------------------------------------------
+      # --------------------------------------------------------
       - name: Cleanup
         if: always()
         run: |
