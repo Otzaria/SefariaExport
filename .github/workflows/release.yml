@@ -1,4 +1,4 @@
-name: Sefaria Export (Self-hosted + Docker Mongo + export_all_merged)
+name: Sefaria Export (Self-hosted runner, Docker Mongo, export_all_merged)
 
 on:
   workflow_dispatch:
@@ -33,6 +33,7 @@ jobs:
           TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M' > ts.txt
           echo "stamp=$(cat ts.txt)" >> $GITHUB_OUTPUT
 
+
   export:
     name: Run export_all_merged
     needs: prep
@@ -45,7 +46,10 @@ jobs:
 
     steps:
 
-      - name: Checkout .github (sparse)
+      # ---------------------------------------------------------
+      # Checkout only .github
+      # ---------------------------------------------------------
+      - name: Checkout .github only
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -54,13 +58,14 @@ jobs:
             .github
           sparse-checkout-cone-mode: false
 
-      # ---------------------------------
-      # Install system dependencies
-      # ---------------------------------
+      # ---------------------------------------------------------
+      # Install system dependencies (with sudo)
+      # ---------------------------------------------------------
       - name: Install system packages
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
+            python3 python3-pip python3-dev \
             build-essential \
             libre2-dev \
             pybind11-dev \
@@ -68,16 +73,13 @@ jobs:
             ninja-build \
             libpq-dev \
             pkg-config \
-            python3-dev \
             aria2 \
             rsync \
-            wget \
-            curl \
-            ca-certificates
+            wget curl git ca-certificates
 
-      # ---------------------------------
+      # ---------------------------------------------------------
       # Install MongoDB Database Tools
-      # ---------------------------------
+      # ---------------------------------------------------------
       - name: Install MongoDB Tools
         run: |
           TOOLS="100.9.4"
@@ -86,36 +88,37 @@ jobs:
           sudo mv mongodb-database-tools-ubuntu2204-x86_64-${TOOLS}/bin/* /usr/local/bin/
           rm -rf mongodb-database-tools*
 
-      # ---------------------------------
-      # Clone Sefaria
-      # ---------------------------------
-      - name: Clone Sefaria
+      # ---------------------------------------------------------
+      # Clone Sefaria project
+      # ---------------------------------------------------------
+      - name: Clone Sefaria repo
         run: |
           git clone --depth 1 https://github.com/Sefaria/Sefaria-Project.git
 
-      # ---------------------------------
-      # Fix requirements: psycopg2 + google-re2 OK now
-      # ---------------------------------
-      - name: Fix requirements (psycopg2 OK)
+      # ---------------------------------------------------------
+      # Fix requirements (ensure psycopg2, google-re2 compile)
+      # ---------------------------------------------------------
+      - name: Clean requirements for system build
         working-directory: Sefaria-Project
         run: |
-          # Ensure psycopg2 is present and installable
+          # Ensure psycopg2 is used (not psycopg2-binary)
           sed -i 's/psycopg2-binary/psycopg2/g' requirements.txt || true
-          echo "✅ psycopg2 will build using libpq-dev"
+          # Ensure google-re2 is not removed
+          echo "✅ requirements prepared for local build"
 
-      # ---------------------------------
-      # Install Python deps
-      # ---------------------------------
+      # ---------------------------------------------------------
+      # Install Python dependencies
+      # ---------------------------------------------------------
       - name: Install Python dependencies
         working-directory: Sefaria-Project
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install --no-cache-dir -r requirements.txt
+          python3 -m pip install --upgrade pip setuptools wheel
+          pip3 install --no-cache-dir -r requirements.txt
 
-      # ---------------------------------
+      # ---------------------------------------------------------
       # Start MongoDB via Docker
-      # ---------------------------------
-      - name: Start MongoDB
+      # ---------------------------------------------------------
+      - name: Start MongoDB (Docker)
         run: |
           docker rm -f sefaria-mongo >/dev/null 2>&1 || true
           docker run -d --name sefaria-mongo -p 27017:27017 mongo:6.0
@@ -127,14 +130,14 @@ jobs:
               echo "✅ MongoDB ready"
               exit 0
             fi
-            echo "⏳ waiting…"
+            echo "⏳ Waiting MongoDB…"
             sleep 2
           done
           exit 1
 
-      # ---------------------------------
-      # Download Mongo Dump
-      # ---------------------------------
+      # ---------------------------------------------------------
+      # Download Mongo dump
+      # ---------------------------------------------------------
       - name: Download dump_small
         run: |
           mkdir -p mongo_dump
@@ -151,16 +154,16 @@ jobs:
             cp -a mongo_dump/sefaria mongo_dump_pkg/
           fi
 
-      # ---------------------------------
+      # ---------------------------------------------------------
       # Restore DB
-      # ---------------------------------
+      # ---------------------------------------------------------
       - name: Restore DB
         run: |
           mongorestore --drop --db sefaria mongo_dump_pkg/sefaria
 
       - name: Ensure history collection
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           from pymongo import MongoClient
           c = MongoClient("mongodb://127.0.0.1:27017")
           db = c["sefaria"]
@@ -169,47 +172,47 @@ jobs:
           print("✅ history collection ok")
           PY
 
-      # ---------------------------------
+      # ---------------------------------------------------------
       # Configure local_settings.py
-      # ---------------------------------
-      - name: Update local_settings.py
+      # ---------------------------------------------------------
+      - name: Configure local_settings.py
         working-directory: Sefaria-Project/sefaria
         run: |
           cp local_settings_example.py local_settings.py
-          python - <<'PY'
+          python3 - <<'PY'
           import os,re
           p="local_settings.py"
           s=open(p).read()
-          s=re.sub(r"SEFARIA_EXPORT_PATH\s*=.*",f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"',s)
-          s=re.sub(r"MONGO_HOST\s*=.*",'MONGO_HOST = "127.0.0.1"',s)
-          s=re.sub(r"MONGO_PORT\s*=.*",'MONGO_PORT = 27017',s)
-          s=re.sub(r"MONGO_DB_NAME\s*=.*",'MONGO_DB_NAME = "sefaria"',s)
-          s=re.sub(r"SEFARIA_DB\s*=.*",'SEFARIA_DB = "sefaria"',s)
+          s=re.sub(r"SEFARIA_EXPORT_PATH\s*=.*", f'SEFARIA_EXPORT_PATH = r"{os.environ["SEFARIA_EXPORT_PATH"]}"', s)
+          s=re.sub(r"MONGO_HOST\s*=.*", 'MONGO_HOST = "127.0.0.1"', s)
+          s=re.sub(r"MONGO_PORT\s*=.*", 'MONGO_PORT = 27017', s)
+          s=re.sub(r"MONGO_DB_NAME\s*=.*", 'MONGO_DB_NAME = "sefaria"', s)
+          s=re.sub(r"SEFARIA_DB\s*=.*", 'SEFARIA_DB = "sefaria"', s)
           open(p,"w").write(s)
           PY
 
-      # ---------------------------------
+      # ---------------------------------------------------------
       # Run export_all_merged
-      # ---------------------------------
+      # ---------------------------------------------------------
       - name: Run export_all_merged
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
         run: |
           mkdir -p "$SEFARIA_EXPORT_PATH/export_all_merged"
-          python - <<'PY'
+          python3 - <<'PY'
           import os,sys,django
           sys.path.insert(0, os.path.abspath("Sefaria-Project"))
           os.environ.setdefault("DJANGO_SETTINGS_MODULE","sefaria.settings")
           django.setup()
           from sefaria import export as ex
           ex.export_all_merged()
-          print("✅ export_all_merged done")
+          print("✅ export_all_merged completed")
           PY
 
-      # ---------------------------------
-      # Push branch named with timestamp
-      # ---------------------------------
-      - name: Push branch
+      # ---------------------------------------------------------
+      # Push branch
+      # ---------------------------------------------------------
+      - name: Push export branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -236,9 +239,11 @@ jobs:
           git -C "$TMP" commit -m "Export at ${TS_STAMP}"
           git -C "$TMP" push --force origin HEAD:"$BRANCH"
 
-      # ---------------------------------
+          echo "✅ Branch pushed: $BRANCH"
+
+      # ---------------------------------------------------------
       # Cleanup
-      # ---------------------------------
+      # ---------------------------------------------------------
       - name: Cleanup
         if: always()
         run: |
