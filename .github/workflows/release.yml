@@ -167,36 +167,35 @@ jobs:
         working-directory: Sefaria-Project
         env:
           PYTHONPATH: ${{ github.workspace }}/Sefaria-Project
+          SEFARIA_EXPORT_BASE: ${{ github.workspace }}/exports
         run: |
-          FN="${FN}"
           python - <<'PY'
           import os, sys, django
           sys.path.insert(0, os.path.abspath("."))
           os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
-          os.environ.setdefault("SEFARIA_EXPORT_PATH", os.environ.get("SEFARIA_EXPORT_BASE"))
+          
+          # Correction: utiliser une valeur par défaut si SEFARIA_EXPORT_BASE n'existe pas
+          export_base = os.environ.get("SEFARIA_EXPORT_BASE", os.path.join(os.getcwd(), "exports"))
+          os.environ["SEFARIA_EXPORT_PATH"] = export_base
+          
           django.setup()
           
           from sefaria import export as ex
           
-          fn = os.environ["FN"]
-          allowed = {
-              "export_all_merged": ex.export_all_merged,
-              "export_links": ex.export_links,
-              "export_schemas": ex.export_schemas,
-              "export_toc": ex.export_toc,
-          }
+          functions_to_run = [
+              ("export_all_merged", ex.export_all_merged),
+              ("export_links", ex.export_links),
+              ("export_schemas", ex.export_schemas),
+              ("export_toc", ex.export_toc),
+          ]
           
-          if fn not in allowed:
-              raise SystemExit(f"Unknown function: {fn}")
+          for fn_name, fn_callable in functions_to_run:
+              print(f"▶️  Running {fn_name}...")
+              fn_callable()
+              print(f"✅ {fn_name} done.")
           
-          allowed[fn]()
-          print(f"✅ {fn} done.")
+          print("✅ All exports completed.")
           PY
-
-          export FN=export_all_merged; run_export "$FN"
-          export FN=export_links;       run_export "$FN"
-          export FN=export_schemas;     run_export "$FN"
-          export FN=export_toc;         run_export "$FN"
 
       - name: Drop DB (free space)
         run: |
