@@ -311,9 +311,10 @@ jobs:
             echo "❌ FINAL_DIR is empty; nothing to push"; exit 1
           fi
 
-      - name: Push merged exports to date-named branch (root + keep .github) — resilient
+      - name: Push merged exports to date-named branch (root + keep .github) — batched & resilient
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BATCH_SIZE: "4000" 
         shell: bash
         run: |
           set -euo pipefail
@@ -336,68 +337,85 @@ jobs:
 
           (cd "$REPO_DIR" && echo "---- Repo root after copy ----" && ls -la | head -n 100)
 
-          cd "$REPO_DIR"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "⚠️ No changes to commit."
-          else
-            echo "Files to commit:"
-            # head d'abord pour éviter SIGPIPE avec pipefail
-            git status --porcelain | head -n 200 | sed -e 's/^/  /' || true
-            git commit -m "chore(export): ALL exports at ${TS_STAMP} [skip ci]"
-          fi
-
-          # alléger le pack et fiabiliser le transport HTTP
-          git config http.version HTTP/1.1
-          git config pack.window 0
-          git config pack.threads 1
-          git config pack.useBitmaps true
-          git config pack.packSizeLimit 100m
-          git config http.postBuffer 524288000 || true
-
-          # GC locale pour réduire le pack
-          git gc --prune=now --aggressive || true
-          git repack -adfl --write-bitmap-index || true
-
-          LOC_HEAD="$(git rev-parse HEAD)"
+          # alléger packs & fiabiliser HTTP
+          git -C "$REPO_DIR" config http.version HTTP/1.1
+          git -C "$REPO_DIR" config pack.window 0
+          git -C "$REPO_DIR" config pack.threads 1
+          git -C "$REPO_DIR" config pack.useBitmaps true
+          git -C "$REPO_DIR" config pack.packSizeLimit 100m
+          git -C "$REPO_DIR" config http.postBuffer 524288000 || true
 
           retry_push() {
             local tries=6
             local delay=5
+            local loc_head="$(git -C "$REPO_DIR" rev-parse HEAD)"
             for i in $(seq 1 $tries); do
               echo "🔁 git push attempt $i/$tries ..."
-              if git push --force origin HEAD:"$TS_BRANCH"; then
+              if git -C "$REPO_DIR" push --force origin HEAD:"$TS_BRANCH"; then
                 echo "✅ Push OK (attempt $i)"
                 return 0
               fi
               code=$?
               echo "❌ Push failed with code $code"
-              # si malgré l'erreur la branche distante a déjà notre commit, c'est bon
-              REM_HEAD="$(git ls-remote --heads origin "$TS_BRANCH" | awk '{print $1}')"
-              if [ -n "$REM_HEAD" ] && [ "$REM_HEAD" = "$LOC_HEAD" ]; then
-                echo "ℹ️ Remote already has our commit ($REM_HEAD). Treat as success."
+              # branche distante déjà à la bonne révision ?
+              rem_head="$(git -C "$REPO_DIR" ls-remote --heads origin "$TS_BRANCH" | awk '{print $1}')"
+              if [ -n "$rem_head" ] && [ "$rem_head" = "$loc_head" ]; then
+                echo "ℹ️ Remote already has our commit ($rem_head). Treat as success."
                 return 0
               fi
-              # resserrer encore le pack et retenter
-              git config pack.packSizeLimit 64m
-              git repack -adfl --write-bitmap-index || true
+              # resserrer pack et retenter
+              git -C "$REPO_DIR" config pack.packSizeLimit 64m
+              git -C "$REPO_DIR" repack -adfl --write-bitmap-index || true
               sleep "$delay"
               delay=$(( delay * 2 ))
             done
             return 1
           }
 
-          if retry_push; then
-            echo "✅ Pushed branch ${TS_BRANCH}"
-          else
-            echo "❌ Push ultimately failed after retries."
-            REM_HEAD="$(git ls-remote --heads origin "$TS_BRANCH" | awk '{print $1}')"
-            if [ -n "$REM_HEAD" ] && [ "$REM_HEAD" = "$LOC_HEAD" ]; then
-              echo "⚠️ Remote shows correct commit despite errors; continuing."
-            else
-              exit 1
+          # Commit & push en lots
+          pushd "$REPO_DIR" >/dev/null
+          git reset
+          i=0
+          declare -a buf=()
+
+          # lister uniquement les fichiers non suivis (tout est untracked sur une branche orpheline)
+          while IFS= read -r -d '' f; do
+            buf+=("$f")
+            if (( ${#buf[@]} >= ${BATCH_SIZE} )); then
+              git add -- "${buf[@]}"
+              echo "Files to commit (batch $((i+1))):"
+              git status --porcelain | head -n 200 | sed -e 's/^/  /' || true
+              git commit -m "chore(export): batch $((i+1)) at ${TS_STAMP} [skip ci]"
+              git gc --prune=now --aggressive || true
+              git repack -adfl --write-bitmap-index || true
+              retry_push || true
+              buf=()
+              ((i++))
             fi
+          done < <(git ls-files -o --exclude-standard -z)
+
+          # reste
+          if (( ${#buf[@]} > 0 )); then
+            git add -- "${buf[@]}"
+            echo "Files to commit (batch $((i+1))):"
+            git status --porcelain | head -n 200 | sed -e 's/^/  /' || true
+            git commit -m "chore(export): batch $((i+1)) at ${TS_STAMP} [skip ci]"
+            git gc --prune=now --aggressive || true
+            git repack -adfl --write-bitmap-index || true
+            retry_push || true
           fi
+
+          # ultime vérif: remote == HEAD local, sinon retente un push
+          LOC_HEAD="$(git rev-parse HEAD)"
+          REM_HEAD="$(git ls-remote --heads origin "$TS_BRANCH" | awk '{print $1}')"
+          if [ "$LOC_HEAD" != "$REM_HEAD" ]; then
+            echo "🔄 Final sync push..."
+            retry_push || {
+              echo "❌ Final push failed and remote is not in sync."; exit 1;
+            }
+          fi
+          popd >/dev/null
+          echo "✅ Pushed branch ${TS_BRANCH} (batched)"
 
       - name: Post-clean Mongo (containers & temp)
         if: always()
