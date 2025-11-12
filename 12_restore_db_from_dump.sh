@@ -33,28 +33,49 @@ mongorestore \
 
 echo "✅ Data restore completed."
 
+echo ""
+echo "🔎 Checking mongorestore capabilities..."
+MONGORESTORE_HELP=$(mongorestore --help 2>&1 || true)
+if echo "$MONGORESTORE_HELP" | grep -q -- "--metadataOnly"; then
+  HAS_METADATA_ONLY=1
+  echo "✅ mongorestore supports --metadataOnly"
+else
+  HAS_METADATA_ONLY=0
+  echo "⚠️  mongorestore does NOT support --metadataOnly on this machine."
+fi
+
 # Phase 2: Optionally restore metadata (indexes) with exclusions to avoid timeouts on heavy collections
 case "${RESTORE_INDEXES_MODE}" in
   all)
-    echo "▶️  Restoring metadata (indexes) for all collections..."
-    mongorestore \
-      --host "${MONGO_HOST}" \
-      --port "${MONGO_PORT}" \
-      --db "${MONGO_DB_NAME}" \
-      --metadataOnly \
-      "mongo_dump_pkg/sefaria"
-    echo "✅ Index metadata restored for all collections."
+    if [ "$HAS_METADATA_ONLY" -eq 1 ]; then
+      echo "▶️  Restoring metadata (indexes) for all collections..."
+      mongorestore \
+        --host "${MONGO_HOST}" \
+        --port "${MONGO_PORT}" \
+        --db "${MONGO_DB_NAME}" \
+        --metadataOnly \
+        "mongo_dump_pkg/sefaria"
+      echo "✅ Index metadata restored for all collections."
+    else
+      echo "ℹ️  Falling back: skipping metadata restore because --metadataOnly is unavailable."
+      echo "    To attempt index creation from dump metadata.json, set ENABLE_INDEXES_FROM_METADATA=true"
+    fi
     ;;
   skip_links)
-    echo "▶️  Restoring metadata (indexes) for all collections EXCEPT '${MONGO_DB_NAME}.links'..."
-    mongorestore \
-      --host "${MONGO_HOST}" \
-      --port "${MONGO_PORT}" \
-      --db "${MONGO_DB_NAME}" \
-      --metadataOnly \
-      --nsExclude "${MONGO_DB_NAME}.links" \
-      "mongo_dump_pkg/sefaria"
-    echo "✅ Index metadata restored (links collection skipped)."
+    if [ "$HAS_METADATA_ONLY" -eq 1 ]; then
+      echo "▶️  Restoring metadata (indexes) for all collections EXCEPT '${MONGO_DB_NAME}.links'..."
+      mongorestore \
+        --host "${MONGO_HOST}" \
+        --port "${MONGO_PORT}" \
+        --db "${MONGO_DB_NAME}" \
+        --metadataOnly \
+        --nsExclude "${MONGO_DB_NAME}.links" \
+        "mongo_dump_pkg/sefaria"
+      echo "✅ Index metadata restored (links collection skipped)."
+    else
+      echo "ℹ️  Falling back: skipping metadata restore because --metadataOnly is unavailable."
+      echo "    To attempt index creation from dump metadata.json (excluding links), set ENABLE_INDEXES_FROM_METADATA=true"
+    fi
     ;;
   none)
     echo "⏭️  Skipping index restoration as requested (RESTORE_INDEXES_MODE=none)."
@@ -64,6 +85,12 @@ case "${RESTORE_INDEXES_MODE}" in
     exit 2
     ;;
 esac
+
+# Optional fallback: create indexes by reading metadata.json files when --metadataOnly is unavailable
+if [ "${ENABLE_INDEXES_FROM_METADATA:-false}" = "true" ] && [ "$HAS_METADATA_ONLY" -eq 0 ] && [ "${RESTORE_INDEXES_MODE}" != "none" ]; then
+  echo "🧩 ENABLE_INDEXES_FROM_METADATA=true — attempting to apply indexes from dump metadata.json"
+  python ./apply_indexes_from_dump.py || echo "⚠️  apply_indexes_from_dump.py encountered errors; continuing without blocking the pipeline."
+fi
 
 # Ensure 'history' collection exists (some exports expect it)
 python ./ensure_history_collection.py
