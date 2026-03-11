@@ -8,6 +8,14 @@ import sys
 import traceback
 
 
+EXPORT_FUNCTION_NAMES = (
+    "export_all_merged",
+    "export_links",
+    "export_schemas",
+    "export_toc",
+)
+
+
 def list_dir_limited(base: str) -> None:
     for root, dirs, files in os.walk(base):
         level = root.replace(base, '').count(os.sep)
@@ -20,6 +28,20 @@ def list_dir_limited(base: str) -> None:
             print(f"{subindent}... and {len(files) - 10} more files")
         if level > 2:
             break
+
+
+def parse_requested_functions(argv: list[str]) -> list[str]:
+    requested = argv[1:] or os.environ.get("SEFARIA_EXPORT_FUNCTIONS", "").split()
+    if not requested:
+        return list(EXPORT_FUNCTION_NAMES)
+
+    invalid = [name for name in requested if name not in EXPORT_FUNCTION_NAMES]
+    if invalid:
+        valid = ", ".join(EXPORT_FUNCTION_NAMES)
+        invalid_joined = ", ".join(invalid)
+        raise SystemExit(f"Unknown export function(s): {invalid_joined}. Valid values: {valid}")
+
+    return requested
 
 
 def main() -> int:
@@ -44,14 +66,16 @@ def main() -> int:
 
     from sefaria import export as ex
 
-    functions_to_run = [
-        ("export_all_merged", ex.export_all_merged),
-        ("export_links", ex.export_links),
-        ("export_schemas", ex.export_schemas),
-        ("export_toc", ex.export_toc),
-    ]
+    available_functions = {
+        "export_all_merged": ex.export_all_merged,
+        "export_links": ex.export_links,
+        "export_schemas": ex.export_schemas,
+        "export_toc": ex.export_toc,
+    }
+    requested_functions = parse_requested_functions(sys.argv)
 
-    for fn_name, fn_callable in functions_to_run:
+    for fn_name in requested_functions:
+        fn_callable = available_functions[fn_name]
         print(f"\n{'='*60}")
         print(f"▶️  Running {fn_name}...")
         print(f"{'='*60}")
@@ -68,7 +92,7 @@ def main() -> int:
             traceback.print_exc()
             return 1
 
-    print("\n✅ All exports completed successfully")
+    print("\n✅ Requested exports completed successfully")
     return 0
 
 
