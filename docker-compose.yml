@@ -28,6 +28,7 @@ services:
       - MONGO_PORT=27017
       - MONGO_DB_NAME=sefaria
       - SEFARIA_EXPORT_PATH=/app/exports
+      - SEFARIA_EXPORT_FUNCTIONS=${SEFARIA_EXPORT_FUNCTIONS:-}
       - TS_STAMP=${TS_STAMP:-}
     volumes:
       - ./exports:/app/exports
