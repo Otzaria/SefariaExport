@@ -31,8 +31,8 @@ services:
       - SEFARIA_EXPORT_FUNCTIONS=${SEFARIA_EXPORT_FUNCTIONS:-}
       - TS_STAMP=${TS_STAMP:-}
     volumes:
-      - ./exports:/app/exports
-      - ./output:/app/output
+      - ${EXPORTS_HOST_DIR:-./exports}:/app/exports
+      - ${OUTPUT_HOST_DIR:-./output}:/app/output
     # Increase shared memory for MongoDB operations
     shm_size: 2gb
 

@@ -46,6 +46,21 @@ jobs:
           echo "stamp=$TS_STAMP" >> "$GITHUB_OUTPUT"
           echo "Timestamp: $TS_STAMP"
 
+      - name: Prepare host artifact directories
+        id: hostdirs
+        run: |
+          ARTIFACT_ROOT="${RUNNER_TEMP}/sefaria-export-${{ github.run_id }}-${{ steps.ts.outputs.stamp }}"
+          EXPORTS_HOST_DIR="${ARTIFACT_ROOT}/exports"
+          OUTPUT_HOST_DIR="${ARTIFACT_ROOT}/output"
+          mkdir -p "${EXPORTS_HOST_DIR}" "${OUTPUT_HOST_DIR}"
+
+          echo "artifact_root=${ARTIFACT_ROOT}" >> "$GITHUB_OUTPUT"
+          echo "exports_dir=${EXPORTS_HOST_DIR}" >> "$GITHUB_OUTPUT"
+          echo "output_dir=${OUTPUT_HOST_DIR}" >> "$GITHUB_OUTPUT"
+
+          echo "Artifact root: ${ARTIFACT_ROOT}"
+          ls -ld "${ARTIFACT_ROOT}" "${EXPORTS_HOST_DIR}" "${OUTPUT_HOST_DIR}"
+
       - name: Determine export scope
         id: scope
         run: |
@@ -68,6 +83,8 @@ jobs:
         env:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
           SEFARIA_EXPORT_FUNCTIONS: ${{ steps.scope.outputs.functions }}
+          EXPORTS_HOST_DIR: ${{ steps.hostdirs.outputs.exports_dir }}
+          OUTPUT_HOST_DIR: ${{ steps.hostdirs.outputs.output_dir }}
         run: docker compose up --build --abort-on-container-exit
 
       - name: Stop and clean up containers
@@ -77,11 +94,11 @@ jobs:
       - name: Inspect generated archives in output
         run: |
           shopt -s nullglob
-          FILES=( ./output/sefaria-exports-*.tar.zst* )
+          FILES=( "${{ steps.hostdirs.outputs.output_dir }}"/sefaria-exports-*.tar.zst* )
           if [ "${#FILES[@]}" -eq 0 ]; then
             echo "❌ No release archives found after export"
-            echo "Output directory:"
-            ls -lah ./output || true
+            echo "Output directory: ${{ steps.hostdirs.outputs.output_dir }}"
+            ls -lah "${{ steps.hostdirs.outputs.output_dir }}" || true
             exit 1
           fi
           echo "📦 Found ${#FILES[@]} archive candidate(s) in output/"
@@ -90,14 +107,14 @@ jobs:
       - name: Stage release archives in workspace root
         run: |
           shopt -s nullglob
-          OUTPUT_FILES=( ./output/sefaria-exports-*.tar.zst* )
+          OUTPUT_FILES=( "${{ steps.hostdirs.outputs.output_dir }}"/sefaria-exports-*.tar.zst* )
           if [ "${#OUTPUT_FILES[@]}" -eq 0 ]; then
             echo "❌ No release archives available to stage from output/"
-            ls -lah ./output || true
+            ls -lah "${{ steps.hostdirs.outputs.output_dir }}" || true
             exit 1
           fi
 
-          mv "${OUTPUT_FILES[@]}" ./
+          cp -f "${OUTPUT_FILES[@]}" ./
 
           ROOT_FILES=( ./sefaria-exports-*.tar.zst* )
           if [ "${#ROOT_FILES[@]}" -eq 0 ]; then
@@ -105,7 +122,7 @@ jobs:
             echo "Workspace root:"
             ls -lah .
             echo "Output directory:"
-            ls -lah ./output || true
+            ls -lah "${{ steps.hostdirs.outputs.output_dir }}" || true
             exit 1
           fi
 
@@ -132,3 +149,11 @@ jobs:
         run: |
           chmod +x ./21_upload_release_assets.sh
           bash ./21_upload_release_assets.sh
+
+      - name: Clean host artifact directories
+        if: always()
+        run: |
+          TARGET="${{ steps.hostdirs.outputs.artifact_root }}"
+          if [ -n "${TARGET}" ] && [ -e "${TARGET}" ]; then
+            rm -rf "${TARGET}" 2>/dev/null || sudo rm -rf "${TARGET}"
+          fi
