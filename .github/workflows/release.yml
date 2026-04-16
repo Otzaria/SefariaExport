@@ -7,12 +7,25 @@ on:
         description: "Timezone for timestamp/tag (IANA name)"
         required: false
         default: "Asia/Jerusalem"
+      export_scope:
+        description: "Export scope for this run"
+        required: false
+        type: choice
+        default: "smoke"
+        options:
+          - smoke
+          - full
+      export_functions:
+        description: "Optional comma-separated export functions override"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 env:
   TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
+  EXPORT_SCOPE: ${{ inputs.export_scope || 'smoke' }}
 
 jobs:
   export_release:
@@ -33,17 +46,48 @@ jobs:
           echo "stamp=$TS_STAMP" >> "$GITHUB_OUTPUT"
           echo "Timestamp: $TS_STAMP"
 
+      - name: Determine export scope
+        id: scope
+        run: |
+          if [ -n "${{ inputs.export_functions }}" ]; then
+            EXPORT_FUNCTIONS="${{ inputs.export_functions }}"
+          elif [ "${EXPORT_SCOPE}" = "smoke" ]; then
+            EXPORT_FUNCTIONS="export_toc,export_schemas"
+          else
+            EXPORT_FUNCTIONS=""
+          fi
+
+          echo "functions=${EXPORT_FUNCTIONS}" >> "$GITHUB_OUTPUT"
+          if [ -n "${EXPORT_FUNCTIONS}" ]; then
+            echo "Selected export functions: ${EXPORT_FUNCTIONS}"
+          else
+            echo "Selected export functions: default full set"
+          fi
+
       - name: Run export pipeline via Docker Compose
         env:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
+          SEFARIA_EXPORT_FUNCTIONS: ${{ steps.scope.outputs.functions }}
         run: docker compose up --build --abort-on-container-exit
 
       - name: Stop and clean up containers
         if: always()
         run: docker compose down --volumes --remove-orphans
 
-      - name: Move archives to workspace root
-        run: mv ./output/sefaria-exports-*.tar.zst* ./ 2>/dev/null || true
+      - name: Inspect generated archives
+        run: |
+          shopt -s nullglob
+          FILES=( ./output/sefaria-exports-*.tar.zst* sefaria-exports-*.tar.zst* )
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "❌ No release archives found after export"
+            echo "Workspace root:"
+            ls -lah .
+            echo "Output directory:"
+            ls -lah ./output || true
+            exit 1
+          fi
+          echo "📦 Found ${#FILES[@]} archive candidate(s)"
+          ls -lah "${FILES[@]}"
 
       - name: Ensure gh CLI
         run: |

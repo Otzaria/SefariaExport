@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+umask 022
+
 echo "=== Sefaria Export Pipeline ==="
 echo "MongoDB: $MONGO_HOST:$MONGO_PORT"
 echo "Database: $MONGO_DB_NAME"
@@ -18,6 +20,12 @@ else
   export TS_STAMP
 fi
 echo "Using timestamp: $TS_STAMP"
+
+if [ -n "${SEFARIA_EXPORT_FUNCTIONS:-}" ]; then
+  echo "Using export functions: ${SEFARIA_EXPORT_FUNCTIONS}"
+else
+  echo "Using default export functions"
+fi
 
 # Run the export pipeline
 echo "Starting export pipeline..."
@@ -40,7 +48,14 @@ echo "Starting export pipeline..."
 
 # Move archives to output directory (mapped as volume)
 mkdir -p /app/output
-mv /app/sefaria-exports-*.tar.zst* /app/output/ 2>/dev/null || true
+shopt -s nullglob
+ARCHIVES=( /app/sefaria-exports-*.tar.zst* )
+if [ "${#ARCHIVES[@]}" -gt 0 ]; then
+  mv "${ARCHIVES[@]}" /app/output/
+  OUTPUT_ARCHIVES=( /app/output/sefaria-exports-*.tar.zst* )
+  chmod 755 /app/output
+  chmod a+r "${OUTPUT_ARCHIVES[@]}"
+fi
 
 echo ""
 echo "=== Export complete! ==="
