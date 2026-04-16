@@ -33,9 +33,23 @@ jobs:
           echo "stamp=$TS_STAMP" >> "$GITHUB_OUTPUT"
           echo "Timestamp: $TS_STAMP"
 
+      - name: Prepare host artifact directories
+        id: hostdirs
+        run: |
+          ARTIFACT_ROOT="${RUNNER_TEMP}/sefaria-export-${{ github.run_id }}-${{ steps.ts.outputs.stamp }}"
+          EXPORTS_HOST_DIR="${ARTIFACT_ROOT}/exports"
+          OUTPUT_HOST_DIR="${ARTIFACT_ROOT}/output"
+          mkdir -p "${EXPORTS_HOST_DIR}" "${OUTPUT_HOST_DIR}"
+
+          echo "artifact_root=${ARTIFACT_ROOT}" >> "$GITHUB_OUTPUT"
+          echo "exports_dir=${EXPORTS_HOST_DIR}" >> "$GITHUB_OUTPUT"
+          echo "output_dir=${OUTPUT_HOST_DIR}" >> "$GITHUB_OUTPUT"
+
       - name: Run export pipeline via Docker Compose
         env:
           TS_STAMP: ${{ steps.ts.outputs.stamp }}
+          EXPORTS_HOST_DIR: ${{ steps.hostdirs.outputs.exports_dir }}
+          OUTPUT_HOST_DIR: ${{ steps.hostdirs.outputs.output_dir }}
         run: docker compose up --build --abort-on-container-exit
 
       - name: Stop and clean up containers
@@ -43,7 +57,12 @@ jobs:
         run: docker compose down --volumes --remove-orphans
 
       - name: Move archives to workspace root
-        run: mv ./output/sefaria-exports-*.tar.zst* ./ 2>/dev/null || true
+        run: |
+          shopt -s nullglob
+          FILES=( "${{ steps.hostdirs.outputs.output_dir }}"/sefaria-exports-*.tar.zst* )
+          if [ "${#FILES[@]}" -gt 0 ]; then
+            cp -f "${FILES[@]}" ./
+          fi
 
       - name: Ensure gh CLI
         run: |
@@ -65,3 +84,11 @@ jobs:
         run: |
           chmod +x ./21_upload_release_assets.sh
           bash ./21_upload_release_assets.sh
+
+      - name: Clean host artifact directories
+        if: always()
+        run: |
+          TARGET="${{ steps.hostdirs.outputs.artifact_root }}"
+          if [ -n "${TARGET}" ] && [ -e "${TARGET}" ]; then
+            rm -rf "${TARGET}" 2>/dev/null || sudo rm -rf "${TARGET}"
+          fi
