@@ -38,7 +38,7 @@ RUN apt-get update -y && \
     ninja-build \
     libpq-dev \
     sudo \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.9 \
+    && curl -sS https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3.9 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
