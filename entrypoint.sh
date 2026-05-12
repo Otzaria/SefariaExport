@@ -33,8 +33,6 @@ echo "Starting export pipeline..."
 ./14_run_exports.sh
 ./15_verify_exports.sh
 ./16_drop_db.sh
-./17a_remove_english_in_exports.sh
-./17b_flatten_hebrew_in_exports.sh
 ./17_build_combined_archive.sh
 ./18_split_archive.sh
 

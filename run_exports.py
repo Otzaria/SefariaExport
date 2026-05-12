@@ -2,10 +2,18 @@
 """
 Run selected export functions from `sefaria.export` with Django configured.
 
+Only the JSON merged format is retained — `txt/`, `cltk-flat/`, `cltk-full/`
+are suppressed at write time (open() filter) and a safety-net cleanup removes
+them after the export call in case the upstream exporter bypasses open().
 """
+import builtins
 import os
+import shutil
 import sys
 import traceback
+
+
+SUPPRESSED_FORMAT_DIRS = ("txt", "cltk-flat", "cltk-full")
 
 
 def list_dir_limited(base: str) -> None:
@@ -20,6 +28,50 @@ def list_dir_limited(base: str) -> None:
             print(f"{subindent}... and {len(files) - 10} more files")
         if level > 2:
             break
+
+
+def install_format_filter(export_base: str):
+    """Monkey-patch builtins.open to drop writes into unwanted format dirs.
+
+    Returns a restore callable.
+    """
+    real_open = builtins.open
+    suppressed_segments = tuple(
+        os.sep + d + os.sep for d in SUPPRESSED_FORMAT_DIRS
+    )
+
+    def _is_write_mode(mode) -> bool:
+        if not isinstance(mode, str):
+            return False
+        return any(ch in mode for ch in ("w", "a", "x", "+"))
+
+    def filtered_open(file, mode="r", *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)) and _is_write_mode(mode):
+            try:
+                path_str = os.fspath(file)
+            except TypeError:
+                path_str = None
+            if path_str is not None:
+                # Normalize to absolute path for reliable segment matching
+                abs_path = path_str if os.path.isabs(path_str) else os.path.abspath(path_str)
+                if any(seg in abs_path for seg in suppressed_segments):
+                    return real_open(os.devnull, mode, *args, **kwargs)
+        return real_open(file, mode, *args, **kwargs)
+
+    builtins.open = filtered_open
+
+    def restore():
+        builtins.open = real_open
+
+    return restore
+
+
+def cleanup_unwanted_formats(export_base: str) -> None:
+    for d in SUPPRESSED_FORMAT_DIRS:
+        target = os.path.join(export_base, d)
+        if os.path.isdir(target):
+            print(f"🧹 Removing unused format dir: {target}")
+            shutil.rmtree(target, ignore_errors=True)
 
 
 def main() -> int:
@@ -44,29 +96,40 @@ def main() -> int:
 
     from sefaria import export as ex
 
-    functions_to_run = [
-        ("export_all_merged", ex.export_all_merged),
-        ("export_links", ex.export_links),
-        ("export_schemas", ex.export_schemas),
-        ("export_toc", ex.export_toc),
-    ]
+    restore_open = install_format_filter(export_base)
+    try:
+        functions_to_run = [
+            ("export_all_merged", ex.export_all_merged),
+            ("export_links", ex.export_links),
+            ("export_schemas", ex.export_schemas),
+            ("export_toc", ex.export_toc),
+        ]
 
-    for fn_name, fn_callable in functions_to_run:
-        print(f"\n{'='*60}")
-        print(f"▶️  Running {fn_name}...")
-        print(f"{'='*60}")
-        try:
-            fn_callable()
-            print(f"✅ {fn_name} completed")
-            print(f"📂 Contents of {export_base} after {fn_name}:")
-            if os.path.isdir(export_base):
-                list_dir_limited(export_base)
-            else:
-                print("(export directory not found)")
-        except Exception as e:  # pragma: no cover
-            print(f"❌ {fn_name} failed: {e}")
-            traceback.print_exc()
-            return 1
+        for fn_name, fn_callable in functions_to_run:
+            print(f"\n{'='*60}")
+            print(f"▶️  Running {fn_name}...")
+            print(f"{'='*60}")
+            try:
+                fn_callable()
+                print(f"✅ {fn_name} completed")
+                # Free disk progressively: drop unwanted formats as soon as
+                # the merged exporter has run.
+                if fn_name == "export_all_merged":
+                    cleanup_unwanted_formats(export_base)
+                print(f"📂 Contents of {export_base} after {fn_name}:")
+                if os.path.isdir(export_base):
+                    list_dir_limited(export_base)
+                else:
+                    print("(export directory not found)")
+            except Exception as e:  # pragma: no cover
+                print(f"❌ {fn_name} failed: {e}")
+                traceback.print_exc()
+                return 1
+    finally:
+        restore_open()
+
+    # Final safety-net cleanup in case anything slipped through.
+    cleanup_unwanted_formats(export_base)
 
     print("\n✅ All exports completed successfully")
     return 0
