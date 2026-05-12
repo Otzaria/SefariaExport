@@ -27,10 +27,9 @@ RUN apt-get update -y && \
     curl \
     jq \
     unzip \
-    python3.9 \
-    python3.9-venv \
-    python3.9-dev \
-    python3.9-distutils \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     libre2-dev \
     pybind11-dev \
     build-essential \
@@ -38,13 +37,13 @@ RUN apt-get update -y && \
     ninja-build \
     libpq-dev \
     sudo \
-    && curl -sS https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3.9 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Make python3.9 the default python
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
+# Make python3.12 the default python
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Install MongoDB Database Tools (detect architecture)
 ENV TOOLS_VER=100.9.4
