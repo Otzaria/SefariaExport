@@ -1,51 +1,36 @@
 #!/usr/bin/env python3
 """
-Create the MongoDB indexes that the export pipeline depends on.
+Re-create all the MongoDB indexes Sefaria expects after a fresh restore.
 
-The `sefaria.export` module performs many `texts.find({title, language})`
-queries sorted by `{priority:-1, _id:1}`. Without a covering index every
-lookup degrades to a COLLSCAN of ~12k docs (~2.4 GB read), which turns the
-full export into a multi-hour job on small runners (github-hosted = 2 vCPU,
-slow virtualised disk).
+Upstream Sefaria-Project ships the canonical list of indexes in
+`sefaria.system.database.ensure_indices()` (≈80 specs covering texts,
+links, index, term, vstate, history, …). The dump's metadata-only
+restore leaves several of these out — most painfully `links.refs.0`,
+without which `export_links()` does a 2.44 GB in-memory sort.
 
-This script is idempotent: existing indexes are left in place.
+Calling the upstream helper keeps us in sync with whatever queries
+Sefaria adds later without having to hand-maintain a parallel list.
 """
 import os
 import sys
 
-from pymongo import ASCENDING, DESCENDING, MongoClient
-
-
-HOST = os.environ.get("MONGO_HOST", "127.0.0.1")
-PORT = int(os.environ.get("MONGO_PORT", "27017"))
-DB_NAME = os.environ.get("MONGO_DB_NAME", "sefaria")
-
-INDEXES = {
-    "texts": [
-        # Covers the hot path `find({title, language}).sort({priority:-1, _id:1})`
-        ([("title", ASCENDING), ("language", ASCENDING), ("priority", DESCENDING)], {}),
-        ([("title", ASCENDING)], {}),
-    ],
-    "index": [
-        ([("title", ASCENDING)], {}),
-        ([("categories", ASCENDING)], {}),
-    ],
-    "term": [
-        ([("name", ASCENDING)], {}),
-    ],
-}
-
 
 def main() -> int:
-    client = MongoClient(HOST, PORT, serverSelectionTimeoutMS=10_000)
-    db = client[DB_NAME]
-    for coll_name, specs in INDEXES.items():
-        coll = db[coll_name]
-        for keys, opts in specs:
-            name = coll.create_index(keys, **opts)
-            pretty = ", ".join(f"{k}:{d}" for k, d in keys)
-            print(f"✅ {coll_name}: ensured index [{pretty}] -> {name}")
-    print("✅ Critical indexes ready.")
+    workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+    proj_dir = os.path.join(workspace, "Sefaria-Project")
+    sys.path.insert(0, os.path.abspath(proj_dir))
+    os.chdir(proj_dir)
+
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sefaria.settings")
+
+    import django
+    django.setup()
+
+    from sefaria.system.database import ensure_indices
+
+    print("🔧 Running sefaria.system.database.ensure_indices() ...")
+    ensure_indices()
+    print("✅ All Sefaria indexes ensured.")
     return 0
 
 
