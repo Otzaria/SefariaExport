@@ -92,6 +92,12 @@ if [ "${ENABLE_INDEXES_FROM_METADATA:-false}" = "true" ] && [ "$HAS_METADATA_ONL
   python ./apply_indexes_from_dump.py || echo "⚠️  apply_indexes_from_dump.py encountered errors; continuing without blocking the pipeline."
 fi
 
+# Create the indexes the export queries rely on. mongorestore --metadataOnly
+# does not always reapply the dump's secondary indexes (and the dump may not
+# even ship them), which forces COLLSCAN on every texts.find({title,language})
+# and turns the export into a multi-hour job on small runners.
+python ./create_critical_indexes.py
+
 # Ensure 'history' collection exists (some exports expect it)
 python ./ensure_history_collection.py
 
