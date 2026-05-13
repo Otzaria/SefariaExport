@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Run selected export functions from `sefaria.export` with Django configured.
+Run a narrow Sefaria export tailored to what the SefariaSqlite generator
+actually consumes:
 
-Only the JSON merged format is retained — `txt/`, `cltk-flat/`, `cltk-full/`
-are suppressed at write time (open() filter) and a safety-net cleanup removes
-them after the export call in case the upstream exporter bypasses open().
+  * Only the JSON merged format (drop txt / cltk-full / cltk-flat).
+  * Only the Hebrew (`he`) language (skip the English merged pass entirely).
+  * Plus links / schemas / TOC.
+
+The cuts are applied at the source (Sefaria's `export_formats` tuple and a
+custom `export_all_merged` loop), so we save both disk IO and CPU compared
+to running the full upstream export.
 """
-import builtins
 import os
-import shutil
 import sys
 import traceback
-
-
-SUPPRESSED_FORMAT_DIRS = ("txt", "cltk-flat", "cltk-full")
 
 
 def list_dir_limited(base: str) -> None:
@@ -30,48 +30,69 @@ def list_dir_limited(base: str) -> None:
             break
 
 
-def install_format_filter(export_base: str):
-    """Monkey-patch builtins.open to drop writes into unwanted format dirs.
+def run_merged_export_he_only(ex) -> None:
+    """Replacement for `ex.export_all_merged()` — Hebrew only.
 
-    Returns a restore callable.
+    Mirrors the upstream loop (see sefaria/export.py::export_all_merged) but
+    drops the English pass to halve the number of slow Mongo lookups and
+    skip writes we don't need.
     """
-    real_open = builtins.open
-    suppressed_segments = tuple(
-        os.sep + d + os.sep for d in SUPPRESSED_FORMAT_DIRS
-    )
+    from sefaria.system.database import db
+    from sefaria.model.text import Ref
 
-    def _is_write_mode(mode) -> bool:
-        if not isinstance(mode, str):
-            return False
-        return any(ch in mode for ch in ("w", "a", "x", "+"))
+    titles = db.texts.find().distinct("title")
+    total = len(titles)
+    print(f"📋 {total} distinct titles to export (he only)")
 
-    def filtered_open(file, mode="r", *args, **kwargs):
-        if isinstance(file, (str, bytes, os.PathLike)) and _is_write_mode(mode):
-            try:
-                path_str = os.fspath(file)
-            except TypeError:
-                path_str = None
-            if path_str is not None:
-                # Normalize to absolute path for reliable segment matching
-                abs_path = path_str if os.path.isabs(path_str) else os.path.abspath(path_str)
-                if any(seg in abs_path for seg in suppressed_segments):
-                    return real_open(os.devnull, mode, *args, **kwargs)
-        return real_open(file, mode, *args, **kwargs)
+    written = skipped = errored = 0
+    for idx, title in enumerate(titles, 1):
+        if not title:
+            continue
+        try:
+            Ref(title)
+        except Exception:
+            skipped += 1
+            continue
 
-    builtins.open = filtered_open
+        if idx % 100 == 0 or idx == total:
+            print(f"  …{idx}/{total} (written={written}, skipped={skipped}, errors={errored})", flush=True)
 
-    def restore():
-        builtins.open = real_open
+        try:
+            prepped = ex.prepare_merged_text_for_export(title, lang="he")
+            if prepped:
+                ex.write_text_doc_to_disk(prepped)
+                written += 1
+        except Exception as e:  # pragma: no cover
+            errored += 1
+            print(f"⚠️  {title}: {e}", flush=True)
 
-    return restore
+    print(f"✅ merged export done: written={written}, skipped={skipped}, errors={errored}")
 
 
-def cleanup_unwanted_formats(export_base: str) -> None:
-    for d in SUPPRESSED_FORMAT_DIRS:
-        target = os.path.join(export_base, d)
-        if os.path.isdir(target):
-            print(f"🧹 Removing unused format dir: {target}")
-            shutil.rmtree(target, ignore_errors=True)
+def flatten_hebrew_dirs(export_base: str) -> None:
+    """Move the contents of every `.../Hebrew/` directory one level up.
+
+    Sefaria's `make_path` writes to `json/<cat>/<book>/Hebrew/merged.json`.
+    The SefariaSqlite generator expects `json/<cat>/<book>/merged.json`, so
+    we collapse the language layer in-place.
+    """
+    import shutil
+
+    targets = []
+    for root, dirs, _files in os.walk(export_base):
+        for d in dirs:
+            if d == "Hebrew":
+                targets.append(os.path.join(root, d))
+
+    print(f"📦 Flattening {len(targets)} Hebrew/ directories under {export_base}")
+    for src in targets:
+        parent = os.path.dirname(src)
+        for entry in os.listdir(src):
+            shutil.move(os.path.join(src, entry), os.path.join(parent, entry))
+        try:
+            os.rmdir(src)
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -96,40 +117,33 @@ def main() -> int:
 
     from sefaria import export as ex
 
-    restore_open = install_format_filter(export_base)
+    # Drop txt / cltk-full / cltk-flat formats at the source. This also
+    # saves the CPU spent by make_cltk_* on every book.
+    print(f"🪓 Restricting export_formats from {[f[0] for f in ex.export_formats]} -> ['json']")
+    ex.export_formats = (('json', ex.make_json),)
+
     try:
-        functions_to_run = [
-            ("export_all_merged", ex.export_all_merged),
-            ("export_links", ex.export_links),
-            ("export_schemas", ex.export_schemas),
-            ("export_toc", ex.export_toc),
-        ]
+        print("\n" + "="*60)
+        print("▶️  Running merged export (Hebrew + JSON only)")
+        print("="*60)
+        run_merged_export_he_only(ex)
 
-        for fn_name, fn_callable in functions_to_run:
-            print(f"\n{'='*60}")
-            print(f"▶️  Running {fn_name}...")
-            print(f"{'='*60}")
-            try:
-                fn_callable()
-                print(f"✅ {fn_name} completed")
-                # Free disk progressively: drop unwanted formats as soon as
-                # the merged exporter has run.
-                if fn_name == "export_all_merged":
-                    cleanup_unwanted_formats(export_base)
-                print(f"📂 Contents of {export_base} after {fn_name}:")
-                if os.path.isdir(export_base):
-                    list_dir_limited(export_base)
-                else:
-                    print("(export directory not found)")
-            except Exception as e:  # pragma: no cover
-                print(f"❌ {fn_name} failed: {e}")
-                traceback.print_exc()
-                return 1
-    finally:
-        restore_open()
+        for fn_name in ("export_links", "export_schemas", "export_toc"):
+            print(f"\n{'='*60}\n▶️  Running {fn_name}...\n{'='*60}")
+            getattr(ex, fn_name)()
+            print(f"✅ {fn_name} completed")
+    except Exception as e:  # pragma: no cover
+        print(f"❌ export step failed: {e}")
+        traceback.print_exc()
+        return 1
 
-    # Final safety-net cleanup in case anything slipped through.
-    cleanup_unwanted_formats(export_base)
+    # Collapse `json/<cat>/<book>/Hebrew/` -> `json/<cat>/<book>/` to match
+    # the layout the SefariaSqlite generator expects.
+    flatten_hebrew_dirs(export_base)
+
+    print(f"\n📂 Final layout of {export_base}:")
+    if os.path.isdir(export_base):
+        list_dir_limited(export_base)
 
     print("\n✅ All exports completed successfully")
     return 0

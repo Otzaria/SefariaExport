@@ -8,6 +8,7 @@ ENV MONGO_PORT=27017
 ENV MONGO_DB_NAME=sefaria
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PYTHONUNBUFFERED=1
 
 # Install base system dependencies and add deadsnakes PPA for Python 3.9
 RUN apt-get update -y && \
