@@ -54,7 +54,14 @@ jobs:
         run: docker compose down --volumes --remove-orphans
 
       - name: Move archives to workspace root
-        run: mv ./output/sefaria-exports-*.tar.zst* ./ 2>/dev/null || true
+        run: |
+          ls -la ./output/ || true
+          # Files inside ./output/ are root-owned (docker container ran as root
+          # against the bind mount). sudo lets the runner user move them out,
+          # and we keep the errors visible to catch real failures.
+          sudo chown -R "$(id -u):$(id -g)" ./output
+          mv ./output/sefaria-exports-*.tar.zst* ./
+          ls -la ./sefaria-exports-*.tar.zst*
 
       - name: Ensure gh CLI
         run: |
