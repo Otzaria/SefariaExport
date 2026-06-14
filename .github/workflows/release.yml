@@ -7,6 +7,11 @@ on:
         description: "Timezone for timestamp/tag (IANA name)"
         required: false
         default: "Asia/Jerusalem"
+      post_to_forum:
+        description: "Publish the changelog to the Otzaria forum"
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
@@ -61,7 +66,9 @@ jobs:
           # and we keep the errors visible to catch real failures.
           sudo chown -R "$(id -u):$(id -g)" ./output
           mv ./output/sefaria-exports-*.tar.zst* ./
-          ls -la ./sefaria-exports-*.tar.zst*
+          # The content manifest produced by 15a_generate_manifest.sh.
+          mv ./output/manifest.txt ./ 2>/dev/null || true
+          ls -la ./sefaria-exports-*.tar.zst* ./manifest.txt || true
 
       - name: Ensure gh CLI
         run: |
@@ -83,3 +90,15 @@ jobs:
         run: |
           chmod +x ./21_upload_release_assets.sh
           bash ./21_upload_release_assets.sh
+
+      - name: Generate changelog and publish to Otzaria forum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TS_STAMP: ${{ steps.ts.outputs.stamp }}
+          USER_NAME: ${{ secrets.USER_NAME }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          POST_TO_FORUM: ${{ inputs.post_to_forum }}
+        run: |
+          python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata
+          chmod +x ./22_generate_changelog.sh
+          bash ./22_generate_changelog.sh

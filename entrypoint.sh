@@ -32,6 +32,7 @@ echo "Starting export pipeline..."
 ./13_check_export_module.sh
 ./14_run_exports.sh
 ./15_verify_exports.sh
+./15a_generate_manifest.sh
 ./16_drop_db.sh
 ./17_build_combined_archive.sh
 ./18_split_archive.sh
