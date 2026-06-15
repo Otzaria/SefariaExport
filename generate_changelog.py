@@ -3,7 +3,64 @@
 import argparse
 import json
 import os
+import re
 import sys
+
+
+def normalize_title_key(value):
+    """Normalize a title to a match key, mirroring SeforimLibrary's normalizeTitleKey
+    (drop quotes/geresh/gershayim, lowercase, collapse whitespace, '_'->' ') so our keys
+    line up with the library's books_blacklist matching."""
+    if value is None or not value.strip():
+        return None
+    without_quotes = (
+        value.replace('"', "")
+        .replace("'", "")
+        .replace("׳", "")  # Hebrew geresh
+        .replace("״", "")  # Hebrew gershayim
+    )
+    collapsed = re.sub(r"\s+", " ", without_quotes.lower()).replace("_", " ")
+    return collapsed.strip()
+
+
+def load_blacklist_keys(path):
+    """Read books_blacklist.txt into a set of normalized keys (skips blanks and #-comments)."""
+    keys = set()
+    if not path or not os.path.isfile(path):
+        return keys
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.lstrip("﻿").strip()
+            if not line or line.startswith("#"):
+                continue
+            line = line.replace('\\"', '"').replace("\\'", "'")
+            key = normalize_title_key(line)
+            if key:
+                keys.add(key)
+    return keys
+
+
+def load_titles(*paths):
+    """Merge {English title: Hebrew title} maps; earlier paths win on conflicts."""
+    merged = {}
+    for path in reversed([p for p in paths if p]):
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                merged.update(data)
+    return merged
+
+
+def is_blacklisted(label, keys, titles):
+    """A book/schema label is blacklisted when its English title (the last path segment)
+    or its Hebrew title (looked up in titles) matches a blacklist key."""
+    en = label.split("/")[-1]
+    for candidate in (en, titles.get(en, "")):
+        key = normalize_title_key(candidate)
+        if key and key in keys:
+            return True
+    return False
 
 
 def load_manifest(path):
@@ -86,6 +143,12 @@ def main():
     ap.add_argument("--old-tag", default="")
     ap.add_argument("--json", dest="json_out", default="",
                     help="also write a machine-readable diff for the forum step")
+    ap.add_argument("--blacklist", default="",
+                    help="books_blacklist.txt; matching books/schemas are dropped from the output")
+    ap.add_argument("--titles", default="",
+                    help="current release titles.json (English->Hebrew, for blacklist matching)")
+    ap.add_argument("--prev-titles", dest="prev_titles", default="",
+                    help="previous release titles.json (Hebrew names for removed books)")
     args = ap.parse_args()
 
     old = load_manifest(args.old_manifest)
@@ -103,6 +166,21 @@ def main():
     added = bucketize(added_paths)
     removed = bucketize(removed_paths)
     changed = bucketize(changed_paths)
+
+    # Drop blacklisted books (and their schemas) so books that never make it into the
+    # library are excluded from both the release notes and the forum diff.
+    blacklist_keys = load_blacklist_keys(args.blacklist)
+    if blacklist_keys:
+        titles = load_titles(args.titles, args.prev_titles)
+        dropped = 0
+        for groups in (added, removed, changed):
+            for bucket in ("book", "schema"):
+                kept = [lab for lab in groups[bucket]
+                        if not is_blacklisted(lab, blacklist_keys, titles)]
+                dropped += len(groups[bucket]) - len(kept)
+                groups[bucket] = kept
+        print(f"🚫 Blacklist ({len(blacklist_keys)} keys): dropped {dropped} "
+              f"book/schema entr{'y' if dropped == 1 else 'ies'} from changelog & forum diff.")
 
     if args.json_out:
         diff = {

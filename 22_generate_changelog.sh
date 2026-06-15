@@ -52,11 +52,26 @@ else
   : > "$OLD_MANIFEST"
 fi
 
+# Fetch the books blacklist (source of truth: the SeforimLibrary repo). Books on it are
+# never imported into the library, so they must be dropped from the changelog/forum too.
+BLACKLIST="$WORKDIR/books_blacklist.txt"
+BLACKLIST_URL="${BOOKS_BLACKLIST_URL:-https://raw.githubusercontent.com/Otzaria/SeforimLibrary/master/generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt}"
+rm -f "$BLACKLIST"
+if curl -fsSL --retry 3 --max-time 60 "$BLACKLIST_URL" -o "$BLACKLIST"; then
+  echo "🚫 Blacklist fetched: $(grep -cvE '^[[:space:]]*(#|$)' "$BLACKLIST") entries from $BLACKLIST_URL"
+else
+  echo "⚠️  Could not fetch blacklist from $BLACKLIST_URL — publishing WITHOUT blacklist filtering."
+  rm -f "$BLACKLIST"
+fi
+
 # Changelog markdown + machine-readable diff for the forum step.
 CHANGELOG="$WORKDIR/CHANGELOG.md"
 DIFF_JSON="$WORKDIR/changelog_diff.json"
 CL_ARGS=( --new-tag "$TAG" --json "$DIFF_JSON" )
 [ -n "$PREV_TAG" ] && CL_ARGS+=( --old-tag "$PREV_TAG" )
+[ -n "$NEW_TITLES" ] && CL_ARGS+=( --titles "$NEW_TITLES" )
+[ -s "$OLD_TITLES" ] && CL_ARGS+=( --prev-titles "$OLD_TITLES" )
+[ -f "$BLACKLIST" ] && CL_ARGS+=( --blacklist "$BLACKLIST" )
 python3 "$WORKDIR/generate_changelog.py" \
   "$OLD_MANIFEST" "$NEW_MANIFEST" "$CHANGELOG" "${CL_ARGS[@]}"
 
