@@ -63,7 +63,7 @@ def main():
     ap.add_argument("diff_json")
     ap.add_argument("--titles", default="", help="current release titles.json")
     ap.add_argument("--prev-titles", default="", help="previous release titles.json")
-    ap.add_argument("--topic", type=int, default=int(os.getenv("FORUM_TOPIC_ID", "20")))
+    ap.add_argument("--topic", type=int, default=int(os.getenv("FORUM_TOPIC_ID", "1617")))
     ap.add_argument("--tag", default="")
     args = ap.parse_args()
 

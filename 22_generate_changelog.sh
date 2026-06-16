@@ -99,7 +99,7 @@ gh release upload "$TAG" "${UPLOADS[@]}" --clobber
 echo "✅ Uploaded ${UPLOADS[*]} to $TAG"
 
 # Publish to the Otzaria forum (gated/non-fatal, see post_to_forum.py).
-FORUM_ARGS=( "$DIFF_JSON" --tag "$TAG" --topic "${FORUM_TOPIC_ID:-20}" )
+FORUM_ARGS=( "$DIFF_JSON" --tag "$TAG" --topic "${FORUM_TOPIC_ID:-1617}" )
 [ -n "$NEW_TITLES" ] && FORUM_ARGS+=( --titles "$NEW_TITLES" )
 [ -s "$OLD_TITLES" ] && FORUM_ARGS+=( --prev-titles "$OLD_TITLES" )
 python3 "$WORKDIR/post_to_forum.py" "${FORUM_ARGS[@]}"
