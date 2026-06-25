@@ -79,18 +79,6 @@ echo "----- CHANGELOG.md -----"
 sed -n '1,40p' "$CHANGELOG"
 echo "------------------------"
 
-# Prepend the changelog to the existing notes.
-EXISTING_NOTES="$(gh release view "$TAG" --json body --jq '.body' 2>/dev/null || true)"
-NOTES_FILE="$WORKDIR/RELEASE_NOTES.md"
-{
-  cat "$CHANGELOG"
-  if [ -n "$EXISTING_NOTES" ]; then
-    printf '\n\n---\n\n%s\n' "$EXISTING_NOTES"
-  fi
-} > "$NOTES_FILE"
-
-gh release edit "$TAG" --notes-file "$NOTES_FILE"
-echo "✅ Release notes updated for $TAG"
 
 # Upload manifest, titles and changelog as assets.
 UPLOADS=( "$NEW_MANIFEST" "$CHANGELOG" )
