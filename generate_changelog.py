@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Diff two export manifests into a Markdown changelog (+ optional --json diff for the forum)."""
+"""Diff two export manifests into a Markdown changelog (+ optional --json diff for the forum).
+
+Book identity is the English title (the last path segment, == titles.json key). On that
+identity we classify, with exact-match only (no fuzzy/similarity guessing):
+  • added / removed       — English title present on only one side
+  • he-renamed            — same English title, different Hebrew title in titles.json
+  • en-renamed            — a removed and an added title sharing an identical content sha256
+  • moved                 — same English title, different category path
+  • content-changed       — same English title, sha256 differs (its own axis: a book may
+                            also appear under renamed/moved, so no change is ever hidden)
+"""
 import argparse
 import json
 import os
@@ -40,23 +50,19 @@ def load_blacklist_keys(path):
     return keys
 
 
-def load_titles(*paths):
-    """Merge {English title: Hebrew title} maps; earlier paths win on conflicts."""
-    merged = {}
-    for path in reversed([p for p in paths if p]):
-        if os.path.isfile(path) and os.path.getsize(path) > 0:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, dict):
-                merged.update(data)
-    return merged
+def load_title_map(path):
+    """Load one {English title: Hebrew title} map; tolerates a missing/empty file."""
+    if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
-def is_blacklisted(label, keys, titles):
-    """A book/schema label is blacklisted when its English title (the last path segment)
-    or its Hebrew title (looked up in titles) matches a blacklist key."""
-    en = label.split("/")[-1]
-    for candidate in (en, titles.get(en, "")):
+def is_blacklisted(en, keys, *he_values):
+    """Blacklisted when the English title or any provided Hebrew title matches a key."""
+    for candidate in (en, *he_values):
         key = normalize_title_key(candidate)
         if key and key in keys:
             return True
@@ -93,45 +99,117 @@ def classify(path):
     return "other", p
 
 
-def bucketize(paths):
-    """Group an iterable of paths by bucket -> sorted list of labels."""
-    groups = {"book": [], "schema": [], "link": [], "toc": [], "other": []}
-    for p in paths:
-        bucket, label = classify(p)
-        groups[bucket].append(label)
-    for k in groups:
-        groups[k].sort()
-    return groups
+def book_records(manifest):
+    """English title -> {label, category, sha} for every book; warn on duplicate titles."""
+    recs, dups = {}, []
+    for path, sha in manifest.items():
+        bucket, label = classify(path)
+        if bucket != "book":
+            continue
+        segs = label.split("/")
+        en, category = segs[-1], "/".join(segs[:-1])
+        if en in recs:
+            dups.append(en)
+        recs[en] = {"label": label, "category": category, "sha": sha}
+    if dups:
+        print(f"⚠️  {len(dups)} duplicate English book title(s) in a manifest; "
+              f"keeping the last seen: {', '.join(sorted(set(dups))[:10])}", file=sys.stderr)
+    return recs
 
 
-def md_list(labels, limit=400):
-    """Render labels as a Markdown bullet list, truncating very long lists."""
-    lines = [f"- {lab}" for lab in labels[:limit]]
-    if len(labels) > limit:
-        lines.append(f"- …and {len(labels) - limit} more")
+def non_book_counts(old, new):
+    """Counts for the 'Also' note: link tables touched and whether the TOC changed."""
+    new_keys, old_keys = set(new), set(old)
+    changed = {k for k in (new_keys & old_keys) if old[k] != new[k]}
+    touched = (new_keys - old_keys) | (old_keys - new_keys) | changed
+    links = sum(1 for p in touched if classify(p)[0] == "link")
+    toc = any(classify(p)[0] == "toc" for p in touched)
+    return links, toc
+
+
+def diff_books(old_recs, new_recs, old_titles, new_titles):
+    """Return the structured book diff (see module docstring for the categories)."""
+    old_en, new_en = set(old_recs), set(new_recs)
+    added_en = new_en - old_en
+    removed_en = old_en - new_en
+    common = old_en & new_en
+
+    # en-rename: pair a removed and an added title by an identical content sha256.
+    old_sha = {}
+    for en in removed_en:
+        old_sha.setdefault(old_recs[en]["sha"], []).append(en)
+    en_renamed, paired_add, paired_rm = [], set(), set()
+    for en in sorted(added_en):
+        bucket = old_sha.get(new_recs[en]["sha"])
+        # Only an unambiguous 1:1 sha match is a rename; never guess on collisions.
+        if bucket and len(bucket) == 1 and bucket[0] not in paired_rm:
+            old_en_name = bucket[0]
+            en_renamed.append({
+                "old_en": old_en_name, "new_en": en,
+                "old_he": old_titles.get(old_en_name), "new_he": new_titles.get(en),
+            })
+            paired_add.add(en)
+            paired_rm.add(old_en_name)
+
+    he_renamed, moved, content = [], [], []
+    for en in sorted(common):
+        o, n = old_recs[en], new_recs[en]
+        he_o, he_n = old_titles.get(en), new_titles.get(en)
+        renamed = he_o is not None and he_n is not None and he_o != he_n
+        movedp = o["category"] != n["category"]
+        if renamed:
+            he_renamed.append({"en": en, "old_he": he_o, "new_he": he_n})
+        if movedp:
+            moved.append({"en": en, "he": he_n or en,
+                          "old_category": o["category"], "new_category": n["category"]})
+        # Content is its own axis: any sha change is reported even alongside a rename
+        # or a move, so a book that changed in several ways is never silently hidden.
+        if o["sha"] != n["sha"]:
+            content.append({"en": en, "he": he_n or en})
+
+    return {
+        "added": [{"en": en, "he": new_titles.get(en)} for en in sorted(added_en - paired_add)],
+        "removed": [{"en": en, "he": old_titles.get(en)} for en in sorted(removed_en - paired_rm)],
+        "he_renamed": he_renamed,
+        "en_renamed": en_renamed,
+        "moved": moved,
+        "content_changed": content,
+    }
+
+
+def apply_blacklist(diff, keys):
+    """Drop blacklisted books from every category; return the count removed."""
+    if not keys:
+        return 0
+    dropped = 0
+
+    def keep(en, *he):
+        nonlocal dropped
+        if is_blacklisted(en, keys, *he):
+            dropped += 1
+            return False
+        return True
+
+    diff["added"] = [b for b in diff["added"] if keep(b["en"], b["he"])]
+    diff["removed"] = [b for b in diff["removed"] if keep(b["en"], b["he"])]
+    diff["content_changed"] = [b for b in diff["content_changed"] if keep(b["en"], b["he"])]
+    diff["moved"] = [b for b in diff["moved"] if keep(b["en"], b["he"])]
+    diff["he_renamed"] = [b for b in diff["he_renamed"] if keep(b["en"], b["old_he"], b["new_he"])]
+    diff["en_renamed"] = [b for b in diff["en_renamed"]
+                          if keep(b["new_en"], b["new_he"]) and keep(b["old_en"], b["old_he"])]
+    return dropped
+
+
+def md_list(items, render, limit=400):
+    """Render items via `render` as a Markdown bullet list, truncating very long lists."""
+    lines = [f"- {render(it)}" for it in items[:limit]]
+    if len(items) > limit:
+        lines.append(f"- …and {len(items) - limit} more")
     return "\n".join(lines)
 
 
-def section(title, groups, show=("book", "schema", "toc"), include_links=False):
-    """Render one top-level section (Added / Removed / Changed)."""
-    parts = []
-    book_subtitles = {
-        "book": "Books",
-        "schema": "Schemas",
-        "toc": "Table of contents",
-        "link": "Link tables",
-        "other": "Other files",
-    }
-    order = list(show)
-    if include_links:
-        order.append("link")
-    order.append("other")
-    for key in order:
-        labels = groups.get(key, [])
-        if not labels:
-            continue
-        parts.append(f"**{book_subtitles[key]}** ({len(labels)})\n\n{md_list(labels)}")
-    return "\n\n".join(parts)
+def _he(it, key="he"):
+    return it.get(key) or it["en"]
 
 
 def main():
@@ -144,123 +222,90 @@ def main():
     ap.add_argument("--json", dest="json_out", default="",
                     help="also write a machine-readable diff for the forum step")
     ap.add_argument("--blacklist", default="",
-                    help="books_blacklist.txt; matching books/schemas are dropped from the output")
+                    help="books_blacklist.txt; matching books are dropped from the output")
     ap.add_argument("--titles", default="",
-                    help="current release titles.json (English->Hebrew, for blacklist matching)")
+                    help="current release titles.json (English->Hebrew)")
     ap.add_argument("--prev-titles", dest="prev_titles", default="",
-                    help="previous release titles.json (Hebrew names for removed books)")
+                    help="previous release titles.json (English->Hebrew)")
     args = ap.parse_args()
 
     old = load_manifest(args.old_manifest)
     new = load_manifest(args.new_manifest)
-
     if not new:
         print("❌ New manifest is empty — nothing to diff", file=sys.stderr)
         return 1
 
-    new_keys, old_keys = set(new), set(old)
-    added_paths = new_keys - old_keys
-    removed_paths = old_keys - new_keys
-    changed_paths = [k for k in (new_keys & old_keys) if old[k] != new[k]]
+    new_titles = load_title_map(args.titles)
+    old_titles = load_title_map(args.prev_titles)
 
-    added = bucketize(added_paths)
-    removed = bucketize(removed_paths)
-    changed = bucketize(changed_paths)
-
-    # Drop blacklisted books (and their schemas) so books that never make it into the
-    # library are excluded from both the release notes and the forum diff.
-    blacklist_keys = load_blacklist_keys(args.blacklist)
-    if blacklist_keys:
-        titles = load_titles(args.titles, args.prev_titles)
-        dropped = 0
-        for groups in (added, removed, changed):
-            for bucket in ("book", "schema"):
-                kept = [lab for lab in groups[bucket]
-                        if not is_blacklisted(lab, blacklist_keys, titles)]
-                dropped += len(groups[bucket]) - len(kept)
-                groups[bucket] = kept
-        print(f"🚫 Blacklist ({len(blacklist_keys)} keys): dropped {dropped} "
-              f"book/schema entr{'y' if dropped == 1 else 'ies'} from changelog & forum diff.")
+    diff = diff_books(book_records(old), book_records(new), old_titles, new_titles)
+    dropped = apply_blacklist(diff, load_blacklist_keys(args.blacklist))
+    if dropped:
+        print(f"🚫 Blacklist: dropped {dropped} book entr{'y' if dropped == 1 else 'ies'} "
+              f"from changelog & forum diff.")
 
     if args.json_out:
-        diff = {
+        payload = {
             "new_tag": args.new_tag,
             "old_tag": args.old_tag,
             "has_baseline": bool(old),
-            "books": {
-                "added": added["book"],
-                "removed": removed["book"],
-                "changed": changed["book"],
-            },
+            "books": diff,
         }
         with open(args.json_out, "w", encoding="utf-8") as fh:
-            json.dump(diff, fh, ensure_ascii=False, indent=2)
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
         print(f"✅ Diff JSON written: {args.json_out}")
 
-    n_books_added = len(added["book"])
-    n_books_removed = len(removed["book"])
-    n_books_changed = len(changed["book"])
-    n_links_changed = len(changed["link"]) + len(added["link"]) + len(removed["link"])
-
-    lines = []
-    lines.append(f"## What changed in `{args.new_tag}`")
-    lines.append("")
+    lines = [f"## What changed in `{args.new_tag}`", ""]
     if not old:
-        lines.append(
+        lines += [
             "_Initial release — no previous manifest to compare against. "
-            "Future releases will list added / removed / changed books here._"
-        )
-        lines.append("")
-        lines.append(f"- Total files in this release: **{len(new)}**")
+            "Future releases will list added / removed / renamed / moved / changed books here._",
+            "",
+            f"- Total files in this release: **{len(new)}**",
+        ]
         _write(args.out_md, "\n".join(lines))
         print(f"✅ Changelog written (initial): {args.out_md}")
         return 0
 
+    n = {k: len(v) for k, v in diff.items()}
     base = f"`{args.old_tag}`" if args.old_tag else "the previous release"
-    lines.append(f"Compared against {base}.")
-    lines.append("")
-    lines.append("| | Books | Schemas |")
-    lines.append("|---|---:|---:|")
-    lines.append(f"| ➕ Added | {n_books_added} | {len(added['schema'])} |")
-    lines.append(f"| ➖ Removed | {n_books_removed} | {len(removed['schema'])} |")
-    lines.append(f"| ✏️ Changed | {n_books_changed} | {len(changed['schema'])} |")
-    lines.append("")
+    lines += [
+        f"Compared against {base}.", "",
+        "| Change | Books |", "|---|---:|",
+        f"| ➕ Added | {n['added']} |",
+        f"| ➖ Removed | {n['removed']} |",
+        f"| ✏️ Renamed | {n['he_renamed'] + n['en_renamed']} |",
+        f"| 📂 Moved | {n['moved']} |",
+        f"| 📝 Content changed | {n['content_changed']} |",
+        "",
+    ]
+    links, toc = non_book_counts(old, new)
     note = []
-    if n_links_changed:
-        note.append(f"{n_links_changed} link table(s) regenerated")
-    if changed["toc"] or added["toc"]:
+    if links:
+        note.append(f"{links} link table(s) regenerated")
+    if toc:
         note.append("table of contents updated")
     if note:
-        lines.append("_Also: " + ", ".join(note) + "._")
-        lines.append("")
+        lines += ["_Also: " + ", ".join(note) + "._", ""]
 
-    if added_paths:
-        body = section("Added", added)
-        if body:
-            lines.append("### ➕ Added")
-            lines.append("")
-            lines.append(body)
-            lines.append("")
-    if removed_paths:
-        body = section("Removed", removed)
-        if body:
-            lines.append("### ➖ Removed")
-            lines.append("")
-            lines.append(body)
-            lines.append("")
-    if changed["book"] or changed["schema"]:
-        body = section("Changed", changed)
-        if body:
-            lines.append("### ✏️ Changed (content)")
-            lines.append("")
-            lines.append(body)
-            lines.append("")
+    def section(title, items, render):
+        if items:
+            lines.extend([f"### {title} ({len(items)})", "", md_list(items, render), ""])
+
+    section("➕ Added", diff["added"], lambda b: f"{_he(b)}  (`{b['en']}`)")
+    section("➖ Removed", diff["removed"], lambda b: f"{_he(b)}  (`{b['en']}`)")
+    section("✏️ Renamed (Hebrew title)", diff["he_renamed"],
+            lambda b: f"`{b['en']}`: {b['old_he']} → {b['new_he']}")
+    section("✏️ Renamed (English title)", diff["en_renamed"],
+            lambda b: f"`{b['old_en']}` → `{b['new_en']}`  ({_he(b, 'new_he')})")
+    section("📂 Moved", diff["moved"],
+            lambda b: f"{_he(b)} (`{b['en']}`): `{b['old_category']}` → `{b['new_category']}`")
+    section("📝 Content changed", diff["content_changed"], lambda b: f"{_he(b)}  (`{b['en']}`)")
 
     _write(args.out_md, "\n".join(lines))
-    print(
-        f"✅ Changelog written: {args.out_md} "
-        f"(books +{n_books_added}/-{n_books_removed}/~{n_books_changed})"
-    )
+    print(f"✅ Changelog written: {args.out_md} (added {n['added']}, removed {n['removed']}, "
+          f"renamed {n['he_renamed'] + n['en_renamed']}, moved {n['moved']}, "
+          f"content {n['content_changed']})")
     return 0
 
 

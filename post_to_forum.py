@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -31,38 +30,34 @@ def heb_date():
         return datetime.now(tz=TZ).strftime("%Y-%m-%d")
 
 
-def en_title(label):
-    """Book label is a category path like 'Halakhah/Ben Ish Hai'."""
-    return label.split("/")[-1]
+def he_of(book, key="he"):
+    """Hebrew title with an English fallback."""
+    return book.get(key) or book.get("en") or book.get("new_en") or ""
 
 
-def norm_en(label):
-    """English title for rename-matching, with a trailing ' (Hebrew)' marker dropped."""
-    en = en_title(label).strip()
-    low = en.lower()
-    if low.endswith("(hebrew)"):
-        en = en[: low.rfind("(hebrew)")].strip()
-    return en.lower()
+def bullets(lines):
+    return "\n".join(f"* {x}" for x in lines)
 
 
-def he_name(label, titles_primary, titles_fallback):
-    en = en_title(label)
-    return titles_primary.get(en) or titles_fallback.get(en) or en
+def rename_lines(he_renamed, en_renamed):
+    """Old→new name pairs (Hebrew) from both Hebrew-title and English-title renames."""
+    pairs = [(b["old_he"], b["new_he"]) for b in he_renamed
+             if b.get("old_he") and b.get("new_he")]
+    pairs += [(b["old_he"], b["new_he"]) for b in en_renamed
+              if b.get("old_he") and b.get("new_he") and b["old_he"] != b["new_he"]]
+    return [f"«{old}» שונה ל־«{new}»" for old, new in sorted(set(pairs))]
 
 
-def name_set(labels, titles_primary, titles_fallback):
-    return {he_name(l, titles_primary, titles_fallback) for l in labels}
-
-
-def bullets(names):
-    return "\n".join(f"* {n}" for n in sorted(names))
+def move_lines(moved):
+    return [f"{he_of(b)} — הועבר מ־{b['old_category']} אל {b['new_category']}"
+            for b in moved]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("diff_json")
-    ap.add_argument("--titles", default="", help="current release titles.json")
-    ap.add_argument("--prev-titles", default="", help="previous release titles.json")
+    ap.add_argument("--titles", default="", help="current release titles.json (unused; kept for compat)")
+    ap.add_argument("--prev-titles", default="", help="previous release titles.json (unused; kept for compat)")
     ap.add_argument("--topic", type=int, default=int(os.getenv("FORUM_TOPIC_ID", "1617")))
     ap.add_argument("--tag", default="")
     args = ap.parse_args()
@@ -76,54 +71,37 @@ def main():
         return 0
 
     books = diff.get("books", {})
-    added, changed, removed = books.get("added", []), books.get("changed", []), books.get("removed", [])
-    if not (added or changed or removed):
+    added = sorted({he_of(b) for b in books.get("added", [])})
+    removed = sorted({he_of(b) for b in books.get("removed", [])})
+    content = sorted({he_of(b) for b in books.get("content_changed", [])})
+    renamed = rename_lines(books.get("he_renamed", []), books.get("en_renamed", []))
+    moved = sorted(move_lines(books.get("moved", [])))
+
+    if not (added or removed or content or renamed or moved):
         print("⏭️  No book changes — skipping forum post.")
-        return 0
-
-    titles_cur = load_json(args.titles, {})
-    titles_prev = load_json(args.prev_titles, {})
-    # Removed books exist only in the previous export -> use previous titles.
-    cur_primary, cur_fallback = titles_cur, titles_prev
-    rm_primary, rm_fallback = titles_prev, titles_cur
-
-    # Pair English-only renames by normalized English title (not heTitle, which
-    # may collide across distinct books) and drop matched pairs from both lists.
-    rm_by_norm = {}
-    for l in removed:
-        rm_by_norm.setdefault(norm_en(l), []).append(l)
-    renamed_added, renamed_removed = set(), set()
-    for l in added:
-        bucket = rm_by_norm.get(norm_en(l))
-        if bucket:
-            renamed_added.add(l)
-            renamed_removed.add(bucket.pop())
-
-    added_names = name_set([l for l in added if l not in renamed_added], cur_primary, cur_fallback)
-    changed_names = name_set(changed, cur_primary, cur_fallback)
-    removed_names = name_set([l for l in removed if l not in renamed_removed], rm_primary, rm_fallback)
-
-    if not (added_names or changed_names or removed_names):
-        print("⏭️  Only renames (no catalog change) — skipping.")
         return 0
 
     date = heb_date()
     tag = args.tag or diff.get("new_tag", "")
     parts = [f"# עדכון ספריית ספריא (Sefaria)\n", f"**עדכון {date}**\n"]
-    if added_names:
-        parts.append(f"\n## התווספו הספרים הבאים:\n{bullets(added_names)}\n")
-    if changed_names:
-        parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(changed_names)}\n")
-    if removed_names:
-        parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed_names)}\n")
+    if added:
+        parts.append(f"\n## ספרים חדשים:\n{bullets(added)}\n")
+    if renamed:
+        parts.append(f"\n## שינויי שם (שם קודם ⟶ שם חדש):\n{bullets(renamed)}\n")
+    if moved:
+        parts.append(f"\n## ספרים שהועברו:\n{bullets(moved)}\n")
+    if content:
+        parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(content)}\n")
+    if removed:
+        parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed)}\n")
 
     repo = os.getenv("GITHUB_REPOSITORY")
     if repo and tag:
         parts.append(f"\n[להורדת העדכון](https://github.com/{repo}/releases/tag/{tag})\n")
 
-    content = "".join(parts)
+    content_text = "".join(parts)
     print("----- forum post -----")
-    print(content)
+    print(content_text)
     print("----------------------")
 
     # Content is always printed above; only the send is gated.
@@ -140,7 +118,7 @@ def main():
     client = OtzariaForumClient(username.strip().replace(" ", "+"), password.strip())
     try:
         client.login()
-        resp = client.send_post(content, args.topic)
+        resp = client.send_post(content_text, args.topic)
         print(f"✅ Posted to forum topic {args.topic}: {str(resp)[:200]}")
     except Exception as e:  # non-fatal
         print(f"⚠️  Forum post failed (non-fatal): {e}")
