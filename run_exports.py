@@ -74,14 +74,15 @@ def run_links_export_extended() -> None:
 
     Mirrors the upstream loop (see sefaria/export.py::export_links) — same
     file naming, chunking, column order and aggregate files — but appends
-    three columns the upstream export drops on the floor:
+    two columns the upstream export drops on the floor:
 
-      * `Highlighted Words`  — JSON list of quoted words to highlight
-        (mongo `links.highlightedWords`, set by the quotation finder).
       * `Char Level Data 1/2` — JSON dict per ref side with
         startChar/endChar (or startWord/endWord for Tanakh verses) plus the
         versionTitle+language the offsets were computed against
         (mongo `links.charLevelData`).
+
+    (`highlightedWords` is intentionally NOT exported: the 2026-07-02 run
+    showed zero populated documents, so the column would be dead weight.)
 
     Consumers that index columns by header name are unaffected by the
     trailing additions.
@@ -127,7 +128,6 @@ def run_links_export_extended() -> None:
                     "Text 2",
                     "Category 1",
                     "Category 2",
-                    "Highlighted Words",
                     "Char Level Data 1",
                     "Char Level Data 2",
             ])
@@ -147,15 +147,6 @@ def run_links_export_extended() -> None:
         except InputError:
             continue
 
-        highlighted = link.get("highlightedWords")
-        highlighted_cell = ""
-        if isinstance(highlighted, list) and highlighted:
-            highlighted_cell = dumps(highlighted)
-            field_counts["highlightedWords"] += 1
-        elif highlighted not in (None, []):
-            field_counts["highlightedWords_malformed"] += 1
-            print(f"⚠️  malformed highlightedWords on {link['refs']}: {highlighted!r}")
-
         char_level = link.get("charLevelData")
         char_cells = ["", ""]
         if isinstance(char_level, list) and len(char_level) == 2:
@@ -174,7 +165,6 @@ def run_links_export_extended() -> None:
             oref2.book,
             oref1.index.categories[0],
             oref2.index.categories[0],
-            highlighted_cell,
             char_cells[0],
             char_cells[1],
         ])
@@ -205,9 +195,8 @@ def run_links_export_extended() -> None:
     write_aggregate_file(links_by_book, "links_by_book.csv")
     write_aggregate_file(links_by_book_without_commentary, "links_by_book_without_commentary.csv")
 
-    print(f"✅ links export done: highlightedWords={field_counts['highlightedWords']}, "
-          f"charLevelData={field_counts['charLevelData']}, "
-          f"malformed={field_counts['highlightedWords_malformed'] + field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
+    print(f"✅ links export done: charLevelData={field_counts['charLevelData']}, "
+          f"malformed={field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
 
 
 def flatten_hebrew_dirs(export_base: str) -> None:
