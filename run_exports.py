@@ -101,9 +101,8 @@ def run_links_export_extended() -> None:
     links_by_book_without_commentary = Counter()
     field_counts = Counter()
 
-    path = export_base + "/links/"
-    if not os.path.exists(os.path.dirname(path)):
-        os.makedirs(os.path.dirname(path))
+    path = os.path.join(export_base, "links")
+    os.makedirs(path, exist_ok=True)
 
     def dumps(value) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -115,7 +114,7 @@ def run_links_export_extended() -> None:
     new_links_file_size = 300000
     for i, link in enumerate(links):
         if i % new_links_file_size == 0:
-            filename = '{}links{}.csv'.format(path, link_file_number)
+            filename = os.path.join(path, f"links{link_file_number}.csv")
             if csvfile is not None:
                 csvfile.close()
             csvfile = open(filename, 'wb')
@@ -134,9 +133,17 @@ def run_links_export_extended() -> None:
             ])
             link_file_number += 1
 
+        # A malformed link document (missing/short refs) must not kill a
+        # 50-minute export run — skip it, but keep it visible in the summary.
+        refs = link.get("refs")
+        if not isinstance(refs, list) or len(refs) < 2:
+            field_counts["refs_malformed"] += 1
+            print(f"⚠️  malformed refs on link {link.get('_id')}: {refs!r}")
+            continue
+
         try:
-            oref1 = Ref(link["refs"][0])
-            oref2 = Ref(link["refs"][1])
+            oref1 = Ref(refs[0])
+            oref2 = Ref(refs[1])
         except InputError:
             continue
 
@@ -158,10 +165,11 @@ def run_links_export_extended() -> None:
             field_counts["charLevelData_malformed"] += 1
             print(f"⚠️  malformed charLevelData on {link['refs']}: {char_level!r}")
 
+        link_type = link.get("type", "")
         writer.writerow([
-            link["refs"][0],
-            link["refs"][1],
-            link["type"],
+            refs[0],
+            refs[1],
+            link_type,
             oref1.book,
             oref2.book,
             oref1.index.categories[0],
@@ -173,14 +181,14 @@ def run_links_export_extended() -> None:
 
         book_link = tuple(sorted([oref1.index.title, oref2.index.title]))
         links_by_book[book_link] += 1
-        if link["type"] not in ("commentary", "Commentary", "targum", "Targum"):
+        if link_type not in ("commentary", "Commentary", "targum", "Targum"):
             links_by_book_without_commentary[book_link] += 1
 
     if csvfile is not None:
         csvfile.close()
 
     def write_aggregate_file(counter, filename):
-        with open(export_base + "/links/%s" % filename, 'wb') as aggfile:
+        with open(os.path.join(path, filename), 'wb') as aggfile:
             agg_writer = csv.writer(aggfile)
             agg_writer.writerow([
                 "Text 1",
@@ -199,7 +207,7 @@ def run_links_export_extended() -> None:
 
     print(f"✅ links export done: highlightedWords={field_counts['highlightedWords']}, "
           f"charLevelData={field_counts['charLevelData']}, "
-          f"malformed={field_counts['highlightedWords_malformed'] + field_counts['charLevelData_malformed']}")
+          f"malformed={field_counts['highlightedWords_malformed'] + field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
 
 
 def flatten_hebrew_dirs(export_base: str) -> None:
