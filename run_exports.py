@@ -69,6 +69,136 @@ def run_merged_export_he_only(ex) -> None:
     print(f"✅ merged export done: written={written}, skipped={skipped}, errors={errored}")
 
 
+def run_links_export_extended() -> None:
+    """Replacement for `ex.export_links()` — adds word-level anchor fields.
+
+    Mirrors the upstream loop (see sefaria/export.py::export_links) — same
+    file naming, chunking, column order and aggregate files — but appends
+    two columns the upstream export drops on the floor:
+
+      * `Char Level Data 1/2` — JSON dict per ref side with
+        startChar/endChar (or startWord/endWord for Tanakh verses) plus the
+        versionTitle+language the offsets were computed against
+        (mongo `links.charLevelData`).
+
+    (`highlightedWords` is intentionally NOT exported: the 2026-07-02 run
+    showed zero populated documents, so the column would be dead weight.)
+
+    Consumers that index columns by header name are unaffected by the
+    trailing additions.
+    """
+    import json
+    import unicodecsv as csv
+    from collections import Counter
+
+    from sefaria.model.text import Ref
+    from sefaria.system.database import db
+    from sefaria.system.exceptions import InputError
+
+    export_base = os.environ["SEFARIA_EXPORT_PATH"]
+
+    print("Exporting links (extended)...")
+    links_by_book = Counter()
+    links_by_book_without_commentary = Counter()
+    field_counts = Counter()
+
+    path = os.path.join(export_base, "links")
+    os.makedirs(path, exist_ok=True)
+
+    def dumps(value) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    link_file_number = 0
+    csvfile = None
+    writer = None
+    links = db.links.find().sort([["refs.0", 1]])
+    new_links_file_size = 300000
+    for i, link in enumerate(links):
+        if i % new_links_file_size == 0:
+            filename = os.path.join(path, f"links{link_file_number}.csv")
+            if csvfile is not None:
+                csvfile.close()
+            csvfile = open(filename, 'wb')
+            writer = csv.writer(csvfile)
+            writer.writerow([
+                    "Citation 1",
+                    "Citation 2",
+                    "Conection Type",
+                    "Text 1",
+                    "Text 2",
+                    "Category 1",
+                    "Category 2",
+                    "Char Level Data 1",
+                    "Char Level Data 2",
+            ])
+            link_file_number += 1
+
+        # A malformed link document (missing/short refs) must not kill a
+        # 50-minute export run — skip it, but keep it visible in the summary.
+        refs = link.get("refs")
+        if not isinstance(refs, list) or len(refs) < 2:
+            field_counts["refs_malformed"] += 1
+            print(f"⚠️  malformed refs on link {link.get('_id')}: {refs!r}")
+            continue
+
+        try:
+            oref1 = Ref(refs[0])
+            oref2 = Ref(refs[1])
+        except InputError:
+            continue
+
+        char_level = link.get("charLevelData")
+        char_cells = ["", ""]
+        if isinstance(char_level, list) and len(char_level) == 2:
+            char_cells = [dumps(char_level[0]), dumps(char_level[1])]
+            field_counts["charLevelData"] += 1
+        elif char_level is not None:
+            field_counts["charLevelData_malformed"] += 1
+            print(f"⚠️  malformed charLevelData on {link['refs']}: {char_level!r}")
+
+        link_type = link.get("type", "")
+        writer.writerow([
+            refs[0],
+            refs[1],
+            link_type,
+            oref1.book,
+            oref2.book,
+            oref1.index.categories[0],
+            oref2.index.categories[0],
+            char_cells[0],
+            char_cells[1],
+        ])
+
+        book_link = tuple(sorted([oref1.index.title, oref2.index.title]))
+        links_by_book[book_link] += 1
+        if link_type not in ("commentary", "Commentary", "targum", "Targum"):
+            links_by_book_without_commentary[book_link] += 1
+
+    if csvfile is not None:
+        csvfile.close()
+
+    def write_aggregate_file(counter, filename):
+        with open(os.path.join(path, filename), 'wb') as aggfile:
+            agg_writer = csv.writer(aggfile)
+            agg_writer.writerow([
+                "Text 1",
+                "Text 2",
+                "Link Count",
+            ])
+            for link in counter.most_common():
+                agg_writer.writerow([
+                    link[0][0],
+                    link[0][1],
+                    link[1],
+                ])
+
+    write_aggregate_file(links_by_book, "links_by_book.csv")
+    write_aggregate_file(links_by_book_without_commentary, "links_by_book_without_commentary.csv")
+
+    print(f"✅ links export done: charLevelData={field_counts['charLevelData']}, "
+          f"malformed={field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
+
+
 def flatten_hebrew_dirs(export_base: str) -> None:
     """Move the contents of every `.../Hebrew/` directory one level up.
 
@@ -128,7 +258,11 @@ def main() -> int:
         print("="*60)
         run_merged_export_he_only(ex)
 
-        for fn_name in ("export_links", "export_schemas", "export_toc"):
+        print(f"\n{'='*60}\n▶️  Running export_links (extended)...\n{'='*60}")
+        run_links_export_extended()
+        print("✅ export_links (extended) completed")
+
+        for fn_name in ("export_schemas", "export_toc"):
             print(f"\n{'='*60}\n▶️  Running {fn_name}...\n{'='*60}")
             getattr(ex, fn_name)()
             print(f"✅ {fn_name} completed")
