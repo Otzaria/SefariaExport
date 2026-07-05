@@ -69,6 +69,94 @@ def run_merged_export_he_only(ex) -> None:
     print(f"✅ merged export done: written={written}, skipped={skipped}, errors={errored}")
 
 
+def _version_text_is_empty(node) -> bool:
+    """True when a version's text tree contains no non-whitespace string."""
+    if node is None:
+        return True
+    if isinstance(node, str):
+        return not node.strip()
+    if isinstance(node, (list, tuple)):
+        return all(_version_text_is_empty(child) for child in node)
+    if isinstance(node, dict):
+        return all(_version_text_is_empty(value) for value in node.values())
+    return False
+
+
+def run_versions_export_he_only(ex) -> None:
+    """Per-version export for titles with 2+ Hebrew versions.
+
+    merged.json is a per-segment mosaic decided by version `priority`; the
+    individual editions (including ones fully shadowed by a higher-priority
+    version) are invisible downstream. This pass writes every non-copyright
+    Hebrew version of every multi-version title via the stock
+    `prepare_text_for_export`, landing as `<versionTitle>.json` next to
+    merged.json after `flatten_hebrew_dirs`. Single-version titles are
+    skipped: their merged.json IS their only version.
+    """
+    from sefaria.system.database import db
+    from sefaria.model.text import Ref
+
+    counts = {}
+    for doc in db.texts.find({"language": "he"}, {"title": 1, "license": 1}):
+        title = doc.get("title")
+        if title and not ex.text_is_copyright(doc):
+            counts[title] = counts.get(title, 0) + 1
+    multi = sorted(t for t, n in counts.items() if n > 1)
+    total = sum(counts[t] for t in multi)
+    print(f"📋 {len(multi)} titles with 2+ non-copyright Hebrew versions "
+          f"(of {len(counts)} titles) → {total} version docs to export")
+
+    written = empty = skipped = errored = 0
+    seen_filenames = set()
+    for text in db.texts.find({"language": "he", "title": {"$in": multi}}):
+        title = text.get("title")
+        if not title or ex.text_is_copyright(text):
+            continue
+        version_title = text.get("versionTitle")
+        if not isinstance(version_title, str) or not version_title.strip():
+            skipped += 1
+            print(f"⚠️  {title}: version without versionTitle skipped", flush=True)
+            continue
+        try:
+            Ref(title)
+        except Exception:
+            skipped += 1
+            continue
+
+        filename = ex.remove_illegal_file_chars(version_title)
+        # A version sanitizing to "merged" would land on merged.json (and the
+        # SefariaSqlite generator matches that name case-insensitively); two
+        # versions collapsing to one filename would overwrite each other.
+        # Both silently corrupt data — abort the run instead.
+        if not filename or filename.lower() == "merged":
+            raise RuntimeError(
+                f"version filename collides with merged.json: {title} / {version_title!r}")
+        key = (title, filename.lower())
+        if key in seen_filenames:
+            raise RuntimeError(
+                f"two versions collapse to the same filename: {title} / {version_title!r}")
+        seen_filenames.add(key)
+
+        if _version_text_is_empty(text.get("chapter")):
+            empty += 1
+            continue
+
+        try:
+            prepped = ex.prepare_text_for_export(text)
+            if prepped:
+                ex.write_text_doc_to_disk(prepped)
+                written += 1
+                if written % 100 == 0:
+                    print(f"  …{written}/{total} (empty={empty}, skipped={skipped}, "
+                          f"errors={errored})", flush=True)
+        except Exception as e:  # pragma: no cover
+            errored += 1
+            print(f"⚠️  {title} / {version_title}: {e}", flush=True)
+
+    print(f"✅ versions export done: written={written}, empty={empty}, "
+          f"skipped={skipped}, errors={errored}")
+
+
 def run_links_export_extended() -> None:
     """Replacement for `ex.export_links()` — adds word-level anchor fields.
 
@@ -257,6 +345,9 @@ def main() -> int:
         print("▶️  Running merged export (Hebrew + JSON only)")
         print("="*60)
         run_merged_export_he_only(ex)
+
+        print(f"\n{'='*60}\n▶️  Running versions export (multi-version titles, Hebrew + JSON only)\n{'='*60}")
+        run_versions_export_he_only(ex)
 
         print(f"\n{'='*60}\n▶️  Running export_links (extended)...\n{'='*60}")
         run_links_export_extended()
