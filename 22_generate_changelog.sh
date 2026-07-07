@@ -52,17 +52,33 @@ else
   : > "$OLD_MANIFEST"
 fi
 
-# Fetch the books blacklist (source of truth: the SeforimLibrary repo). Books on it are
-# never imported into the library, so they must be dropped from the changelog/forum too.
+# Fetch an optional blacklist from the SeforimLibrary repo; a fetch failure is non-fatal
+# ($2 removed, $4 printed). Both blacklists live there — the fork's main branch is `otzaria`.
+fetch_optional_list() {  # $1=url $2=dest $3=success-label $4=absence-note
+  rm -f "$2"
+  if curl -fsSL --retry 3 --max-time 60 "$1" -o "$2"; then
+    echo "🚫 $3 fetched: $(grep -cvE '^[[:space:]]*(#|$)' "$2") entries from $1"
+  else
+    echo "$4"
+    rm -f "$2"
+  fi
+}
+
+# Books on the books blacklist are never imported, so they are dropped from the changelog/forum.
 BLACKLIST="$WORKDIR/books_blacklist.txt"
-BLACKLIST_URL="${BOOKS_BLACKLIST_URL:-https://raw.githubusercontent.com/Otzaria/SeforimLibrary/master/generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt}"
-rm -f "$BLACKLIST"
-if curl -fsSL --retry 3 --max-time 60 "$BLACKLIST_URL" -o "$BLACKLIST"; then
-  echo "🚫 Blacklist fetched: $(grep -cvE '^[[:space:]]*(#|$)' "$BLACKLIST") entries from $BLACKLIST_URL"
-else
-  echo "⚠️  Could not fetch blacklist from $BLACKLIST_URL — publishing WITHOUT blacklist filtering."
-  rm -f "$BLACKLIST"
-fi
+BLACKLIST_URL="${BOOKS_BLACKLIST_URL:-https://raw.githubusercontent.com/Otzaria/SeforimLibrary/otzaria/generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt}"
+fetch_optional_list "$BLACKLIST_URL" "$BLACKLIST" "Blacklist" \
+  "⚠️  Could not fetch blacklist from $BLACKLIST_URL — publishing WITHOUT blacklist filtering."
+
+# The versions blacklist keeps already-excluded editions out of the "new book versions" report.
+VERSIONS_BLACKLIST="$WORKDIR/black_versions.txt"
+VERSIONS_BLACKLIST_URL="${VERSIONS_BLACKLIST_URL:-https://raw.githubusercontent.com/Otzaria/SeforimLibrary/otzaria/generator/sefariasqlite/src/jvmMain/resources/black_versions.txt}"
+fetch_optional_list "$VERSIONS_BLACKLIST_URL" "$VERSIONS_BLACKLIST" "Versions blacklist" \
+  "ℹ️  No versions blacklist at $VERSIONS_BLACKLIST_URL — reporting all new versions."
+
+# Exports dir (bind-mounted, persists after the container exits) — read to resolve each new
+# version's exact versionTitle, since the on-disk filename is sanitized and would not match.
+EXPORTS_DIR="${SEFARIA_EXPORT_PATH:-$WORKDIR/exports}"
 
 # Changelog markdown + machine-readable diff for the forum step.
 CHANGELOG="$WORKDIR/CHANGELOG.md"
@@ -72,6 +88,8 @@ CL_ARGS=( --new-tag "$TAG" --json "$DIFF_JSON" )
 [ -n "$NEW_TITLES" ] && CL_ARGS+=( --titles "$NEW_TITLES" )
 [ -s "$OLD_TITLES" ] && CL_ARGS+=( --prev-titles "$OLD_TITLES" )
 [ -f "$BLACKLIST" ] && CL_ARGS+=( --blacklist "$BLACKLIST" )
+[ -f "$VERSIONS_BLACKLIST" ] && CL_ARGS+=( --versions-blacklist "$VERSIONS_BLACKLIST" )
+[ -d "$EXPORTS_DIR" ] && CL_ARGS+=( --exports-dir "$EXPORTS_DIR" )
 python3 "$WORKDIR/generate_changelog.py" \
   "$OLD_MANIFEST" "$NEW_MANIFEST" "$CHANGELOG" "${CL_ARGS[@]}"
 
