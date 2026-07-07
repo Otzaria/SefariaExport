@@ -33,21 +33,22 @@ def normalize_title_key(value):
     return collapsed.strip()
 
 
-def load_blacklist_keys(path):
-    """Read books_blacklist.txt into a set of normalized keys (skips blanks and #-comments)."""
-    keys = set()
+def blacklist_lines(path):
+    """Yield cleaned entries from a blacklist file: BOM/whitespace stripped, blanks and
+    #-comments skipped, backslash-escaped quotes unescaped. Shared by both blacklists."""
     if not path or not os.path.isfile(path):
-        return keys
+        return
     with open(path, encoding="utf-8") as fh:
         for raw in fh:
             line = raw.lstrip("﻿").strip()
             if not line or line.startswith("#"):
                 continue
-            line = line.replace('\\"', '"').replace("\\'", "'")
-            key = normalize_title_key(line)
-            if key:
-                keys.add(key)
-    return keys
+            yield line.replace('\\"', '"').replace("\\'", "'")
+
+
+def load_blacklist_keys(path):
+    """Read books_blacklist.txt into a set of normalized keys."""
+    return {key for line in blacklist_lines(path) if (key := normalize_title_key(line))}
 
 
 def load_title_map(path):
@@ -100,6 +101,89 @@ def classify(path):
     if p == "table_of_contents.json":
         return "toc", "table_of_contents.json"
     return "other", p
+
+
+def version_records(manifest):
+    """classify-label -> {path, book_en, filename} for every per-version text file."""
+    recs = {}
+    for path in manifest:
+        bucket, label = classify(path)
+        if bucket != "version":
+            continue
+        segs = label.split("/")
+        if len(segs) < 2:  # need at least <book>/<versionFile>
+            continue
+        recs[label] = {"path": path, "book_en": segs[-2], "filename": segs[-1]}
+    return recs
+
+
+def read_version_titles(exports_dir, manifest_path):
+    """Exact (versionTitle, heVersionTitle) from the export file itself — the on-disk
+    filename is sanitized (parens/quotes stripped) and would not match the library's
+    exact key. (None, None) if unreadable."""
+    if not exports_dir:
+        return None, None
+    rel = manifest_path[2:] if manifest_path.startswith("./") else manifest_path
+    full = os.path.join(exports_dir, rel)
+    try:
+        with open(full, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        vt = (doc.get("versionTitle") or "").strip() or None
+        he = (doc.get("versionTitleInHebrew") or "").strip() or None
+        return vt, he
+    except Exception as e:
+        print(f"⚠️  Could not read exact version title from {full}: {e}", file=sys.stderr)
+        return None, None
+
+
+def load_versions_blacklist(path):
+    """Parse black_versions.txt → (global_keys, {book_key: {version_keys}}), mirroring the
+    generator's VersionsBlacklist: '<version>' is global, '<book> | <version>' is scoped."""
+    global_keys, per_book = set(), {}
+    for line in blacklist_lines(path):
+        if "|" in line:
+            book, version = line.split("|", 1)
+            bk, vk = normalize_title_key(book), normalize_title_key(version)
+            if bk and vk:
+                per_book.setdefault(bk, set()).add(vk)
+        else:
+            vk = normalize_title_key(line)
+            if vk:
+                global_keys.add(vk)
+    return global_keys, per_book
+
+
+def is_version_blacklisted(book_en, book_he, ver_en, ver_he, global_keys, per_book):
+    vkeys = {normalize_title_key(ver_en), normalize_title_key(ver_he)} - {None}
+    if vkeys & global_keys:
+        return True
+    for bk in (normalize_title_key(book_en), normalize_title_key(book_he)):
+        if bk and vkeys & per_book.get(bk, set()):
+            return True
+    return False
+
+
+def diff_versions(old, new, new_titles, exports_dir, book_keys, vbl):
+    """Added per-version files not already excluded. Each: {book_en, book_he, version, exact}.
+    Skips versions of blacklisted books and already-blacklisted versions."""
+    old_recs, new_recs = version_records(old), version_records(new)
+    added = sorted(set(new_recs) - set(old_recs))
+    global_keys, per_book = vbl
+    out = []
+    for label in added:
+        rec = new_recs[label]
+        book_en = rec["book_en"]
+        book_he = new_titles.get(book_en)
+        if is_blacklisted(book_en, book_keys, book_he):
+            continue  # whole book never imported → its versions are irrelevant
+        ver, he_ver = read_version_titles(exports_dir, rec["path"])
+        exact = ver is not None
+        if not exact:
+            ver = rec["filename"]  # best-effort fallback (warned above)
+        if is_version_blacklisted(book_en, book_he, ver, he_ver, global_keys, per_book):
+            continue
+        out.append({"book_en": book_en, "book_he": book_he, "version": ver, "exact": exact})
+    return out
 
 
 def book_records(manifest):
@@ -231,6 +315,10 @@ def main():
                     help="current release titles.json (English->Hebrew)")
     ap.add_argument("--prev-titles", dest="prev_titles", default="",
                     help="previous release titles.json (English->Hebrew)")
+    ap.add_argument("--exports-dir", dest="exports_dir", default="",
+                    help="exports dir; read to resolve exact versionTitle for new versions")
+    ap.add_argument("--versions-blacklist", dest="versions_blacklist", default="",
+                    help="black_versions.txt; already-listed versions are dropped from the output")
     args = ap.parse_args()
 
     old = load_manifest(args.old_manifest)
@@ -242,11 +330,24 @@ def main():
     new_titles = load_title_map(args.titles)
     old_titles = load_title_map(args.prev_titles)
 
+    book_keys = load_blacklist_keys(args.blacklist)
     diff = diff_books(book_records(old), book_records(new), old_titles, new_titles)
-    dropped = apply_blacklist(diff, load_blacklist_keys(args.blacklist))
+    dropped = apply_blacklist(diff, book_keys)
     if dropped:
         print(f"🚫 Blacklist: dropped {dropped} book entr{'y' if dropped == 1 else 'ies'} "
               f"from changelog & forum diff.")
+
+    # New book editions (book_version) — reported so they can be triaged into
+    # black_versions.txt. Exact versionTitle is read from the export files.
+    # Skipped on an initial release (no baseline → every version looks "new").
+    versions_blacklist = load_versions_blacklist(args.versions_blacklist)
+    new_versions = diff_versions(
+        old, new, new_titles, args.exports_dir, book_keys, versions_blacklist,
+    ) if old else []
+    if new_versions:
+        inexact = sum(1 for v in new_versions if not v["exact"])
+        print(f"🆕 New book versions: {len(new_versions)}"
+              + (f" ({inexact} with filename-derived title — verify)" if inexact else ""))
 
     if args.json_out:
         payload = {
@@ -254,6 +355,7 @@ def main():
             "old_tag": args.old_tag,
             "has_baseline": bool(old),
             "books": diff,
+            "versions": {"added": new_versions},
         }
         with open(args.json_out, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -308,10 +410,13 @@ def main():
             lambda b: f"{_he(b)} (`{b['en']}`): `{b['old_category']}` → `{b['new_category']}`")
     section("📝 Content changed", diff["content_changed"], lambda b: f"{_he(b)}  (`{b['en']}`)")
 
+    # New book versions are intentionally NOT written here — they are reported to the
+    # forum (post_to_forum.py) via the JSON diff's "versions" key, not to a saved file.
+
     _write(args.out_md, "\n".join(lines))
     print(f"✅ Changelog written: {args.out_md} (added {n['added']}, removed {n['removed']}, "
           f"renamed {n['he_renamed'] + n['en_renamed']}, moved {n['moved']}, "
-          f"content {n['content_changed']})")
+          f"content {n['content_changed']}, new versions {len(new_versions)})")
     return 0
 
 

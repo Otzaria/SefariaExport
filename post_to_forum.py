@@ -53,6 +53,17 @@ def move_lines(moved):
             for b in moved]
 
 
+def version_lines(versions):
+    """Pasteable `book | versionTitle` lines for new editions (for black_versions.txt)."""
+    out = []
+    for v in sorted(versions, key=lambda v: (v.get("book_he") or v.get("book_en") or "",
+                                             v.get("version") or "")):
+        book = v.get("book_he") or v.get("book_en") or ""
+        mark = "" if v.get("exact", True) else "  ⁇"
+        out.append(f"{book} | {v.get('version', '')}{mark}")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("diff_json")
@@ -76,8 +87,9 @@ def main():
     content = sorted({he_of(b) for b in books.get("content_changed", [])})
     renamed = rename_lines(books.get("he_renamed", []), books.get("en_renamed", []))
     moved = sorted(move_lines(books.get("moved", [])))
+    versions = version_lines(diff.get("versions", {}).get("added", []))
 
-    if not (added or removed or content or renamed or moved):
+    if not (added or removed or content or renamed or moved or versions):
         print("⏭️  No book changes — skipping forum post.")
         return 0
 
@@ -94,6 +106,10 @@ def main():
         parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(content)}\n")
     if removed:
         parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed)}\n")
+    if versions:
+        # Pasteable `book | versionTitle` lines for triage into black_versions.txt.
+        block = "\n".join(versions)
+        parts.append(f"\n## גרסאות (מהדורות) חדשות:\n```\n{block}\n```\n")
 
     repo = os.getenv("GITHUB_REPOSITORY")
     if repo and tag:
