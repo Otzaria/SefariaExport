@@ -99,8 +99,11 @@ echo "------------------------"
 
 
 # Upload manifest, titles and changelog as assets.
+# changelog_diff.json is published too: downstream tooling (the linker repo) consumes it
+# machine-readably for rename/move detection — see LINKER_IMPLEMENTATION_STAGES.md stage 0.
 UPLOADS=( "$NEW_MANIFEST" "$CHANGELOG" )
 [ -n "$NEW_TITLES" ] && UPLOADS+=( "$NEW_TITLES" )
+[ -f "$DIFF_JSON" ] && UPLOADS+=( "$DIFF_JSON" )
 gh release upload "$TAG" "${UPLOADS[@]}" --clobber
 echo "✅ Uploaded ${UPLOADS[*]} to $TAG"
 
