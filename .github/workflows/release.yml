@@ -1,20 +1,31 @@
 name: Sefaria Export via Docker Compose
 
+run-name: Sefaria immutable export ${{ github.run_id }}-${{ github.run_attempt }}
+
 on:
   workflow_dispatch:
     inputs:
       timezone:
-        description: "Timezone for timestamp/tag (IANA name)"
+        description: Timezone for the human-readable part of the tag (IANA name)
         required: false
-        default: "Asia/Jerusalem"
+        default: Asia/Jerusalem
       post_to_forum:
-        description: "Publish the changelog to the Otzaria forum"
+        description: Publish the display-only changelog to the Otzaria forum
         type: boolean
         required: false
         default: true
+      allow_initial_baseline:
+        description: Allow previous:null when bootstrapping the first immutable release
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: sefaria-export-release
+  cancel-in-progress: false
 
 env:
   TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
@@ -26,7 +37,7 @@ jobs:
 
     steps:
       - name: Free disk space on runner
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
         with:
           tool-cache: true
           android: true
@@ -36,69 +47,215 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - name: Checkout
+      - name: Checkout exact exporter commit
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           clean: true
+          persist-credentials: false
 
-      - name: Compute release timestamp
-        id: ts
+      - name: Validate release tooling
+        run: python3 -m unittest -v test_release_contract.py test_resolve_release_chain_head.py test_release_workflow_contract.py
+
+      - name: Compute immutable tag
+        id: release
+        shell: bash
         run: |
-          TS_STAMP=$(TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M')
-          echo "stamp=$TS_STAMP" >> "$GITHUB_OUTPUT"
-          echo "Timestamp: $TS_STAMP"
+          set -euo pipefail
+          stamp="$(TZ="${TZ_NAME}" date '+%Y-%m-%d_%H-%M')-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]+-[0-9]+$ ]]
+          echo "tag=$stamp" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the exact previous immutable release
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALLOW_INITIAL: ${{ inputs.allow_initial_baseline }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 resolve_release_chain_head.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --output previous-resolution.json \
+            --allow-initial-baseline "$ALLOW_INITIAL"
+          is_initial="$(jq -r '.is_initial' previous-resolution.json)"
+          [[ "$is_initial" == true || "$is_initial" == false ]]
+          echo "is_initial=$is_initial" >> "$GITHUB_OUTPUT"
+          if [[ "$(jq -r '.has_immutable_chain' previous-resolution.json)" != true ]]; then
+            [[ "$is_initial" == true ]]
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "metadata_sha256=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$is_initial" == false ]]
+          previous_tag="$(jq -r '.tag' previous-resolution.json)"
+          expected_metadata_sha="$(jq -r '.metadata_sha256' previous-resolution.json)"
+          mkdir previous-release
+          gh release download "$previous_tag" --pattern release_metadata.json --dir previous-release
+          metadata_sha="$(python3 release_contract.py validate --metadata previous-release/release_metadata.json)"
+          [[ "$metadata_sha" == "$expected_metadata_sha" ]]
+          echo "tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "metadata_sha256=$metadata_sha" >> "$GITHUB_OUTPUT"
 
       - name: Run export pipeline via Docker Compose
         env:
-          TS_STAMP: ${{ steps.ts.outputs.stamp }}
+          TS_STAMP: ${{ steps.release.outputs.tag }}
         run: docker compose up --build --abort-on-container-exit
 
       - name: Stop and clean up containers
         if: always()
         run: docker compose down --volumes --remove-orphans
 
-      - name: Move archives to workspace root
+      - name: Collect required release inputs
+        shell: bash
         run: |
-          ls -la ./output/ || true
-          # Files inside ./output/ are root-owned (docker container ran as root
-          # against the bind mount). sudo lets the runner user move them out,
-          # and we keep the errors visible to catch real failures.
+          set -euo pipefail
           sudo chown -R "$(id -u):$(id -g)" ./output
-          mv ./output/sefaria-exports-*.tar.zst* ./
-          # The content manifest produced by 15a_generate_manifest.sh.
-          mv ./output/manifest.txt ./ 2>/dev/null || true
-          ls -la ./sefaria-exports-*.tar.zst* ./manifest.txt || true
+          shopt -s nullglob
+          archives=(./output/sefaria-exports-*.tar.zst*)
+          [[ ${#archives[@]} -gt 0 ]]
+          mv "${archives[@]}" ./
+          mv ./output/manifest.txt ./manifest.txt
+          mv ./output/titles.json ./titles.json
+          test -s manifest.txt
+          test -s titles.json
 
-      - name: Ensure gh CLI
-        run: |
-          chmod +x ./19_ensure_gh_cli.sh
-          bash ./19_ensure_gh_cli.sh
+      - name: Ensure GitHub CLI
+        run: bash ./19_ensure_gh_cli.sh
 
-      - name: Create/Update Release
+      - name: Generate full machine changelog and filtered forum copy
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TS_STAMP: ${{ steps.ts.outputs.stamp }}
-        run: |
-          chmod +x ./20_create_or_update_release.sh
-          bash ./20_create_or_update_release.sh
-
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TS_STAMP: ${{ steps.ts.outputs.stamp }}
-        run: |
-          chmod +x ./21_upload_release_assets.sh
-          bash ./21_upload_release_assets.sh
-
-      - name: Generate changelog and publish to Otzaria forum
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TS_STAMP: ${{ steps.ts.outputs.stamp }}
-          USER_NAME: ${{ secrets.USER_NAME }}
-          PASSWORD: ${{ secrets.PASSWORD }}
-          POST_TO_FORUM: ${{ inputs.post_to_forum }}
+          GH_TOKEN: ${{ github.token }}
+          TS_STAMP: ${{ steps.release.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
         run: |
           python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata
-          chmod +x ./22_generate_changelog.sh
           bash ./22_generate_changelog.sh
+
+      - name: Build canonical release metadata
+        id: metadata
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          PREVIOUS_METADATA_SHA256: ${{ steps.previous.outputs.metadata_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          parts=(sefaria-exports-*.tar.zst.part-*)
+          if [[ ${#parts[@]} -eq 0 ]]; then
+            parts=(sefaria-exports-*.tar.zst)
+          fi
+          [[ ${#parts[@]} -gt 0 ]]
+          args=()
+          for part in "${parts[@]}"; do args+=(--archive-part "$part"); done
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            args+=(--previous-tag "$PREVIOUS_TAG" --previous-metadata-sha256 "$PREVIOUS_METADATA_SHA256")
+          fi
+          metadata_sha="$(python3 release_contract.py build \
+            --tag "$TAG" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-commit "$GITHUB_SHA" \
+            "${args[@]}" \
+            --manifest manifest.txt \
+            --titles titles.json \
+            --changelog changelog_diff.json \
+            --output release_metadata.json)"
+          echo "sha256=$metadata_sha" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$(jq -r '.archive.sha256' release_metadata.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft and upload immutable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; immutable releases are never overwritten." >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "Sefaria Export $TAG" \
+            --notes-file CHANGELOG.md
+          mapfile -t archive_names < <(jq -r '.archive.parts[].name' release_metadata.json)
+          gh release upload "$TAG" \
+            "${archive_names[@]}" \
+            manifest.txt titles.json changelog_diff.json release_metadata.json \
+            CHANGELOG.md forum_changelog_diff.json
+
+      - name: Download and verify every uploaded asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          EXPECTED_METADATA_SHA: ${{ steps.metadata.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release-verification
+          mkdir release-verification
+          gh release download "$TAG" --dir release-verification
+          actual_metadata_sha="$(python3 release_contract.py validate \
+            --metadata release-verification/release_metadata.json \
+            --asset-dir release-verification)"
+          [[ "$actual_metadata_sha" == "$EXPECTED_METADATA_SHA" ]]
+          for display_asset in CHANGELOG.md forum_changelog_diff.json; do
+            cmp "$display_asset" "release-verification/$display_asset"
+            [[ "$(stat -c '%s' "$display_asset")" == "$(stat -c '%s' "release-verification/$display_asset")" ]]
+            [[ "$(sha256sum "$display_asset" | cut -d' ' -f1)" == "$(sha256sum "release-verification/$display_asset" | cut -d' ' -f1)" ]]
+          done
+          expected_assets="$(jq -r '[.archive.parts[].name, .manifest.name, .titles.name, .changelog.name, "release_metadata.json", "CHANGELOG.md", "forum_changelog_diff.json"] | sort | .[]' release_metadata.json)"
+          remote_assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | sort | .[]')"
+          [[ "$remote_assets" == "$expected_assets" ]]
+          remote_target="$(gh release view "$TAG" --json targetCommitish --jq '.targetCommitish')"
+          [[ "$remote_target" == "$GITHUB_SHA" ]]
+
+      - name: Publish verified release last
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false --latest
+          tag_target="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
+          [[ "$tag_target" == "$GITHUB_SHA" ]]
+
+      - name: Publish display-only changelog to forum
+        if: ${{ inputs.post_to_forum }}
+        continue-on-error: true
+        env:
+          USER_NAME: ${{ secrets.USER_NAME }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          POST_TO_FORUM: "true"
+          TAG: ${{ steps.release.outputs.tag }}
+        run: python3 post_to_forum.py forum_changelog_diff.json --tag "$TAG" --topic "${FORUM_TOPIC_ID:-1617}" --titles titles.json --prev-titles prev_titles.json
+
+      - name: Dispatch exact manual-link synchronization
+        if: steps.previous.outputs.is_initial == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          METADATA_SHA: ${{ steps.metadata.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          correlation="sefaria:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:${TAG}:${METADATA_SHA}"
+          for attempt in 1 2 3; do
+            if gh workflow run sync-manual-links.yml \
+              -R Otzaria/otzaria-library \
+              -f sefaria_tag="$TAG" \
+              -f sefaria_release_metadata_sha256="$METADATA_SHA" \
+              -f sefaria_run_id="$GITHUB_RUN_ID" \
+              -f sefaria_run_attempt="$GITHUB_RUN_ATTEMPT" \
+              -f correlation_id="$correlation"; then
+              exit 0
+            fi
+            sleep "$((attempt * 10))"
+          done
+          echo "The release is published, but exact downstream dispatch failed." >&2
+          echo "Recover by dispatching sync-manual-links.yml with the same five inputs." >&2
+          exit 1

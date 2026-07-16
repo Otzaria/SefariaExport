@@ -71,17 +71,21 @@ def is_blacklisted(en, keys, *he_values):
 
 
 def load_manifest(path):
-    """Return {relative_path: sha256}. Tolerates a missing/empty file."""
+    """Return {relative_path: sha256}; reject malformed or ambiguous input."""
     out = {}
     if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
         return out
     with open(path, encoding="utf-8") as fh:
-        for line in fh:
+        for number, line in enumerate(fh, 1):
             line = line.rstrip("\n")
-            if len(line) < 67:  # 64 hash + 2 spaces + >=1 char path
-                continue
+            if len(line) < 67 or line[64:66] != "  ":
+                raise ValueError(f"malformed manifest line {number} in {path}")
             digest = line[:64]
             filepath = line[66:]  # skip the 64-char hash and the two spaces
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or not filepath:
+                raise ValueError(f"malformed manifest line {number} in {path}")
+            if filepath in out:
+                raise ValueError(f"duplicate manifest path {filepath!r} in {path}")
             out[filepath] = digest
     return out
 
@@ -187,7 +191,7 @@ def diff_versions(old, new, new_titles, exports_dir, book_keys, vbl):
 
 
 def book_records(manifest):
-    """English title -> {label, category, sha} for every book; warn on duplicate titles."""
+    """English title -> {label, category, sha}; ambiguity is a hard failure."""
     recs, dups = {}, []
     for path, sha in manifest.items():
         bucket, label = classify(path)
@@ -199,8 +203,10 @@ def book_records(manifest):
             dups.append(en)
         recs[en] = {"label": label, "category": category, "sha": sha}
     if dups:
-        print(f"⚠️  {len(dups)} duplicate English book title(s) in a manifest; "
-              f"keeping the last seen: {', '.join(sorted(set(dups))[:10])}", file=sys.stderr)
+        raise ValueError(
+            f"duplicate English book title(s) in a manifest: "
+            f"{', '.join(sorted(set(dups))[:10])}"
+        )
     return recs
 
 

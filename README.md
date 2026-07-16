@@ -110,12 +110,12 @@ bash 17b_flatten_hebrew_in_exports.sh
 bash 18_split_archive.sh
 ```
 
-13) (Optional) Create a GitHub Release and upload assets
-```
-bash 19_ensure_gh_cli.sh
-bash 20_create_or_update_release.sh
-bash 21_upload_release_assets.sh
-```
+13) Create and verify an immutable GitHub Release
+
+Dispatch `.github/workflows/release.yml`. Release creation, asset upload,
+byte-for-byte verification and final publication are intentionally available
+only through that serialized workflow. The legacy `20_...` and `21_...`
+scripts fail closed and must not be used.
 
 Notes
 - The scripts are idempotent where practical; if something fails, re-running from the last successful step is typically fine.
