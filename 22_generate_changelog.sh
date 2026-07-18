@@ -37,9 +37,14 @@ OLD_TITLES="$WORKDIR/prev_titles.json"
 rm -f "$OLD_MANIFEST" "$OLD_TITLES"
 if [ -n "$PREV_TAG" ]; then
   echo "🔎 Previous release: $PREV_TAG — downloading its manifest + titles..."
-  gh release download "$PREV_TAG" -p manifest.txt -O "$OLD_MANIFEST"
-  gh release download "$PREV_TAG" -p titles.json -O "$OLD_TITLES"
-  PYTHONPATH="$WORKDIR" python3 - "$WORKDIR/previous-release/release_metadata.json" "$OLD_MANIFEST" "$OLD_TITLES" <<'PY'
+  # Download under the original asset names: file_descriptor() includes the name,
+  # so validating a renamed copy would always fail the contract check.
+  PREV_ASSETS="$WORKDIR/previous-assets"
+  rm -rf "$PREV_ASSETS"
+  mkdir -p "$PREV_ASSETS"
+  gh release download "$PREV_TAG" -p manifest.txt -O "$PREV_ASSETS/manifest.txt"
+  gh release download "$PREV_TAG" -p titles.json -O "$PREV_ASSETS/titles.json"
+  PYTHONPATH="$WORKDIR" python3 - "$WORKDIR/previous-release/release_metadata.json" "$PREV_ASSETS/manifest.txt" "$PREV_ASSETS/titles.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -51,6 +56,8 @@ for field, path in (("manifest", Path(sys.argv[2])), ("titles", Path(sys.argv[3]
     if file_descriptor(path) != metadata[field]:
         raise ContractError(f"downloaded previous {field} differs from release metadata")
 PY
+  mv "$PREV_ASSETS/manifest.txt" "$OLD_MANIFEST"
+  mv "$PREV_ASSETS/titles.json" "$OLD_TITLES"
   echo "✅ Got previous manifest ($(wc -l < "$OLD_MANIFEST") files) and titles.json"
 else
   echo "ℹ️  Explicit initial baseline — no previous release."
