@@ -112,7 +112,7 @@ def validate_metadata(metadata: object, asset_dir: Path | None = None) -> dict:
     }
     if set(metadata) != required:
         raise ContractError(f"metadata keys differ: missing={required - set(metadata)}, extra={set(metadata) - required}")
-    if metadata["schema_version"] != 1:
+    if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
         raise ContractError("unsupported schema_version")
     tag = metadata["tag"]
     if not isinstance(tag, str) or not TAG_RE.fullmatch(tag):

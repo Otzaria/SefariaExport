@@ -1,6 +1,6 @@
 name: Sefaria Export via Docker Compose
 
-run-name: Sefaria immutable export ${{ github.run_id }}-${{ github.run_attempt }}
+run-name: Sefaria immutable export orchestration=${{ inputs.orchestration_id || format('standalone:{0}:{1}', github.run_id, github.run_attempt) }}
 
 on:
   workflow_dispatch:
@@ -19,6 +19,11 @@ on:
         type: boolean
         required: false
         default: false
+      orchestration_id:
+        description: Exact weekly dispatcher identity; empty for a standalone export
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -26,6 +31,9 @@ permissions:
 concurrency:
   group: sefaria-export-release
   cancel-in-progress: false
+  # Each queued export is a distinct weekly intent.  Preserve every pending
+  # release instead of allowing a later dispatch to supersede it.
+  queue: max
 
 env:
   TZ_NAME: ${{ inputs.timezone || 'Asia/Jerusalem' }}
@@ -55,7 +63,15 @@ jobs:
           persist-credentials: false
 
       - name: Validate release tooling
-        run: python3 -m unittest -v test_release_contract.py test_resolve_release_chain_head.py test_release_workflow_contract.py
+        run: python3 -m unittest -v test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_resolve_release_chain_head.py test_release_workflow_contract.py
+
+      - name: Validate optional orchestration identity
+        env:
+          ORCHESTRATION_ID: ${{ inputs.orchestration_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -z "$ORCHESTRATION_ID" ] || [[ "$ORCHESTRATION_ID" =~ ^weekly:[1-9][0-9]*:[1-9][0-9]*$ ]]
 
       - name: Compute immutable tag
         id: release
@@ -165,10 +181,27 @@ jobs:
           echo "sha256=$metadata_sha" >> "$GITHUB_OUTPUT"
           echo "archive_sha256=$(jq -r '.archive.sha256' release_metadata.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Build immutable downstream intent
+        if: steps.previous.outputs.is_initial == 'false'
+        id: downstream_intent
+        env:
+          SOURCE_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_name="$(python3 downstream_intent.py build \
+            --source-repo "$SOURCE_REPO" \
+            --metadata release_metadata.json \
+            --output-dir .)"
+          [[ "$asset_name" =~ ^downstream-intent-[0-9a-f]{64}\.json$ ]]
+          test -s "$asset_name"
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+
       - name: Create draft and upload immutable assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
+          INTENT_ASSET: ${{ steps.downstream_intent.outputs.asset_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -182,16 +215,24 @@ jobs:
             --title "Sefaria Export $TAG" \
             --notes-file CHANGELOG.md
           mapfile -t archive_names < <(jq -r '.archive.parts[].name' release_metadata.json)
+          intent_assets=()
+          if [[ -n "$INTENT_ASSET" ]]; then
+            [[ "$INTENT_ASSET" =~ ^downstream-intent-[0-9a-f]{64}\.json$ ]]
+            test -s "$INTENT_ASSET"
+            intent_assets+=("$INTENT_ASSET")
+          fi
           gh release upload "$TAG" \
             "${archive_names[@]}" \
             manifest.txt titles.json changelog_diff.json release_metadata.json \
-            CHANGELOG.md forum_changelog_diff.json
+            CHANGELOG.md forum_changelog_diff.json "${intent_assets[@]}"
 
       - name: Download and verify every uploaded asset
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
           EXPECTED_METADATA_SHA: ${{ steps.metadata.outputs.sha256 }}
+          INTENT_ASSET: ${{ steps.downstream_intent.outputs.asset_name }}
+          SOURCE_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -207,7 +248,17 @@ jobs:
             [[ "$(stat -c '%s' "$display_asset")" == "$(stat -c '%s' "release-verification/$display_asset")" ]]
             [[ "$(sha256sum "$display_asset" | cut -d' ' -f1)" == "$(sha256sum "release-verification/$display_asset" | cut -d' ' -f1)" ]]
           done
-          expected_assets="$(jq -r '[.archive.parts[].name, .manifest.name, .titles.name, .changelog.name, "release_metadata.json", "CHANGELOG.md", "forum_changelog_diff.json"] | sort | .[]' release_metadata.json)"
+          if [[ -n "$INTENT_ASSET" ]]; then
+            python3 downstream_intent.py validate \
+              --source-repo "$SOURCE_REPO" \
+              --metadata release-verification/release_metadata.json \
+              --intent "release-verification/$INTENT_ASSET" >/dev/null
+          fi
+          expected_assets="$(jq -r --arg intent "$INTENT_ASSET" \
+            '[.archive.parts[].name, .manifest.name, .titles.name, .changelog.name,
+              "release_metadata.json", "CHANGELOG.md", "forum_changelog_diff.json"]
+             + (if $intent == "" then [] else [$intent] end) | sort | .[]' \
+            release_metadata.json)"
           remote_assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | sort | .[]')"
           [[ "$remote_assets" == "$expected_assets" ]]
           remote_target="$(gh release view "$TAG" --json targetCommitish --jq '.targetCommitish')"
@@ -239,23 +290,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
           TAG: ${{ steps.release.outputs.tag }}
-          METADATA_SHA: ${{ steps.metadata.outputs.sha256 }}
+          SOURCE_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          correlation="sefaria:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:${TAG}:${METADATA_SHA}"
-          for attempt in 1 2 3; do
-            if gh workflow run sync-manual-links.yml \
-              -R Otzaria/otzaria-library \
-              -f sefaria_tag="$TAG" \
-              -f sefaria_release_metadata_sha256="$METADATA_SHA" \
-              -f sefaria_run_id="$GITHUB_RUN_ID" \
-              -f sefaria_run_attempt="$GITHUB_RUN_ATTEMPT" \
-              -f correlation_id="$correlation"; then
-              exit 0
-            fi
-            sleep "$((attempt * 10))"
-          done
-          echo "The release is published, but exact downstream dispatch failed." >&2
-          echo "Recover by dispatching sync-manual-links.yml with the same five inputs." >&2
-          exit 1
+          # The helper performs a read-before-write and submits at most once.
+          # If the response is lost, this job fails without a blind retry; the
+          # scheduled reconciler will observe the durable release intent first.
+          python3 reconcile_downstream.py --source-repo "$SOURCE_REPO" --tag "$TAG"

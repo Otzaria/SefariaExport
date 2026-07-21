@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Reconcile published Sefaria intents with exact Otzaria root runs."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+from downstream_intent import (
+    INTENT_NAME_RE,
+    REPO_RE,
+    TARGET_REPO,
+    TARGET_WORKFLOW,
+    load_and_validate,
+)
+from release_contract import ContractError, sha256_file
+from resolve_release_chain_head import verify_release_asset_contract
+
+
+ACTIVE_STATUSES = {"requested", "waiting", "pending", "queued", "in_progress"}
+TERMINAL_CONCLUSIONS = {
+    "action_required",
+    "cancelled",
+    "failure",
+    "neutral",
+    "skipped",
+    "stale",
+    "startup_failure",
+    "success",
+    "timed_out",
+}
+MAX_RERUN_ATTEMPTS = 3
+GITHUB_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+
+
+class ReconcileError(RuntimeError):
+    pass
+
+
+def parse_github_timestamp(value: str) -> dt.datetime:
+    if not isinstance(value, str) or not GITHUB_TIMESTAMP_RE.fullmatch(value):
+        raise ReconcileError(f"invalid GitHub UTC timestamp: {value!r}")
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=dt.timezone.utc
+        )
+    except ValueError as exc:
+        raise ReconcileError(f"invalid GitHub UTC timestamp: {value!r}") from exc
+
+
+@dataclass(frozen=True)
+class ReleaseIntent:
+    tag: str
+    published_at: str
+    metadata_sha256: str
+    intent_asset: dict
+    metadata_asset: dict
+    api_assets: tuple[dict, ...]
+
+    @property
+    def run_identity(self) -> tuple[int, int]:
+        match = re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-([0-9]+)-([0-9]+)",
+            self.tag,
+        )
+        if not match or int(match.group(1)) <= 0 or int(match.group(2)) <= 0:
+            raise ReconcileError(f"release tag does not contain a valid run identity: {self.tag}")
+        return int(match.group(1)), int(match.group(2))
+
+    @property
+    def correlation_id(self) -> str:
+        run_id, run_attempt = self.run_identity
+        return f"sefaria:{run_id}:{run_attempt}:{self.tag}:{self.metadata_sha256}"
+
+    @property
+    def root_title(self) -> str:
+        return f"sync-manual-links correlation={self.correlation_id}"
+
+
+def gh_lines(arguments: list[str]) -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["gh", *arguments],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise ReconcileError(f"gh {' '.join(arguments)} failed: {detail}") from exc
+    return [line for line in completed.stdout.splitlines() if line]
+
+
+def strict_api_asset(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {"name", "size", "digest"}:
+        raise ReconcileError("GitHub release asset has an unexpected shape")
+    if not isinstance(value["name"], str):
+        raise ReconcileError("GitHub release asset name is not a string")
+    if isinstance(value["size"], bool) or not isinstance(value["size"], int) or value["size"] < 0:
+        raise ReconcileError("GitHub release asset size is invalid")
+    if not isinstance(value["digest"], str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", value["digest"]
+    ):
+        raise ReconcileError("GitHub release asset digest is not a SHA-256")
+    return value
+
+
+def published_intents(source_repo: str, only_tag: str = "") -> list[ReleaseIntent]:
+    if not isinstance(source_repo, str) or not REPO_RE.fullmatch(source_repo):
+        raise ReconcileError("source repository must be owner/name")
+    jq = (
+        '.[] | select(.draft|not) | '
+        '{tag:.tag_name,published_at:.published_at,'
+        'assets:[.assets[]|{name:.name,size:.size,digest:.digest}]} | @json'
+    )
+    rows = gh_lines([
+        "api",
+        "--paginate",
+        f"repos/{source_repo}/releases?per_page=100",
+        "--jq",
+        jq,
+    ])
+    releases = []
+    seen_tags = set()
+    for row in rows:
+        try:
+            value = json.loads(row)
+        except json.JSONDecodeError as exc:
+            raise ReconcileError("GitHub releases API returned invalid JSON") from exc
+        if not isinstance(value, dict) or set(value) != {"tag", "published_at", "assets"}:
+            raise ReconcileError("GitHub release row has an unexpected shape")
+        tag = value["tag"]
+        published_at = value["published_at"]
+        if not isinstance(tag, str) or not isinstance(published_at, str) or not isinstance(value["assets"], list):
+            raise ReconcileError("GitHub release identity is invalid")
+        if tag in seen_tags:
+            raise ReconcileError(f"GitHub releases API repeated tag {tag}")
+        seen_tags.add(tag)
+        if only_tag and tag != only_tag:
+            continue
+        parse_github_timestamp(published_at)
+        raw_assets = value["assets"]
+        intent_candidates = [
+            asset
+            for asset in raw_assets
+            if isinstance(asset, dict)
+            and isinstance(asset.get("name"), str)
+            and INTENT_NAME_RE.fullmatch(asset["name"])
+        ]
+        # Legacy releases intentionally have no delivery intent.  Do not impose
+        # the newer API-digest contract on unrelated historical assets.
+        if not intent_candidates:
+            continue
+        assets = [strict_api_asset(asset) for asset in raw_assets]
+        intent_assets = [asset for asset in assets if INTENT_NAME_RE.fullmatch(asset["name"])]
+        if len(intent_assets) != 1:
+            raise ReconcileError(f"release {tag} has multiple downstream intents")
+        metadata_assets = [asset for asset in assets if asset["name"] == "release_metadata.json"]
+        if len(metadata_assets) != 1:
+            raise ReconcileError(f"release {tag} must contain exactly one release_metadata.json")
+        metadata_sha = INTENT_NAME_RE.fullmatch(intent_assets[0]["name"]).group(1)
+        releases.append(
+            ReleaseIntent(
+                tag,
+                published_at,
+                metadata_sha,
+                intent_assets[0],
+                metadata_assets[0],
+                tuple(assets),
+            )
+        )
+    if only_tag and not releases:
+        raise ReconcileError(f"published release {only_tag} has no durable downstream intent")
+    return releases
+
+
+def target_runs() -> dict[str, list[dict]]:
+    jq = (
+        '.workflow_runs[] | '
+        '{id:.id,title:.display_title,status:.status,conclusion:.conclusion,'
+        'attempt:.run_attempt,event:.event,created_at:.created_at} | @json'
+    )
+    rows = gh_lines([
+        "api",
+        "--paginate",
+        f"repos/{TARGET_REPO}/actions/workflows/{TARGET_WORKFLOW}/runs?per_page=100",
+        "--jq",
+        jq,
+    ])
+    by_title: dict[str, list[dict]] = {}
+    seen_ids = set()
+    for row in rows:
+        try:
+            value = json.loads(row)
+        except json.JSONDecodeError as exc:
+            raise ReconcileError("GitHub workflow-runs API returned invalid JSON") from exc
+        expected = {"id", "title", "status", "conclusion", "attempt", "event", "created_at"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ReconcileError("GitHub workflow-run row has an unexpected shape")
+        if (
+            isinstance(value["id"], bool)
+            or not isinstance(value["id"], int)
+            or value["id"] <= 0
+            or isinstance(value["attempt"], bool)
+            or not isinstance(value["attempt"], int)
+            or value["attempt"] <= 0
+            or not all(isinstance(value[field], str) for field in ("title", "status", "event", "created_at"))
+            or (value["conclusion"] is not None and not isinstance(value["conclusion"], str))
+        ):
+            raise ReconcileError("GitHub workflow-run values are invalid")
+        if value["id"] in seen_ids:
+            continue
+        seen_ids.add(value["id"])
+        by_title.setdefault(value["title"], []).append(value)
+    return by_title
+
+
+def verify_local_release(source_repo: str, release: ReleaseIntent) -> dict:
+    with tempfile.TemporaryDirectory(prefix="sefaria-downstream-intent-") as temporary:
+        root = Path(temporary)
+        for pattern in (release.intent_asset["name"], "release_metadata.json"):
+            gh_lines([
+                "release",
+                "download",
+                release.tag,
+                "-R",
+                source_repo,
+                "--pattern",
+                pattern,
+                "--dir",
+                str(root),
+            ])
+        intent_path = root / release.intent_asset["name"]
+        metadata_path = root / "release_metadata.json"
+        intent, metadata, metadata_sha = load_and_validate(
+            intent_path, metadata_path, source_repo
+        )
+        if metadata["tag"] != release.tag or metadata_sha != release.metadata_sha256:
+            raise ReconcileError(f"release {release.tag} identity differs from its intent")
+        verify_release_asset_contract(
+            metadata,
+            metadata_path,
+            list(release.api_assets),
+        )
+        if (
+            release.intent_asset["size"] != intent_path.stat().st_size
+            or release.intent_asset["digest"] != f"sha256:{sha256_file(intent_path)}"
+        ):
+            raise ReconcileError(f"release {release.tag} intent bytes differ from the GitHub digest")
+        ref = gh_lines([
+            "api",
+            f"repos/{source_repo}/git/ref/tags/{release.tag}",
+            "--jq",
+            ".object.sha",
+        ])
+        if ref != [metadata["source_commit"]]:
+            raise ReconcileError(f"release {release.tag} tag target differs from metadata")
+        return intent
+
+
+def run_matches_release(run: dict, release: ReleaseIntent) -> None:
+    if run["event"] != "workflow_dispatch":
+        raise ReconcileError(f"root {run['id']} was not workflow_dispatch")
+    run_created = parse_github_timestamp(run["created_at"])
+    release_created = parse_github_timestamp(release.published_at)
+    if run_created < release_created:
+        raise ReconcileError(f"root {run['id']} predates release {release.tag}")
+
+
+def dispatch(intent: dict) -> None:
+    # Deliberately one attempt.  A non-zero gh result has ambiguous delivery
+    # semantics; the next scheduled reconciliation will observe before retrying.
+    gh_lines([
+        "workflow",
+        "run",
+        intent["target_workflow"],
+        "-R",
+        intent["target_repo"],
+        "-f",
+        f"sefaria_tag={intent['source_tag']}",
+        "-f",
+        f"sefaria_release_metadata_sha256={intent['source_release_metadata_sha256']}",
+        "-f",
+        f"sefaria_run_id={intent['source_run_id']}",
+        "-f",
+        f"sefaria_run_attempt={intent['source_run_attempt']}",
+        "-f",
+        f"correlation_id={intent['correlation_id']}",
+    ])
+
+
+def reconcile_one(source_repo: str, release: ReleaseIntent, runs: dict[str, list[dict]]) -> str:
+    exact = runs.get(release.root_title, [])
+    if len(exact) > 1:
+        raise ReconcileError(
+            f"release {release.tag} has {len(exact)} exact roots; refusing to choose"
+        )
+    if not exact:
+        intent = verify_local_release(source_repo, release)
+        dispatch(intent)
+        return "dispatched"
+    run = exact[0]
+    run_matches_release(run, release)
+    status = run["status"]
+    conclusion = run["conclusion"]
+    if status in ACTIVE_STATUSES and conclusion is None:
+        return f"active:{status}"
+    if status != "completed" or conclusion not in TERMINAL_CONCLUSIONS:
+        raise ReconcileError(f"root {run['id']} has unknown state {status}:{conclusion}")
+    if conclusion == "success":
+        return "complete"
+    if run["attempt"] >= MAX_RERUN_ATTEMPTS:
+        raise ReconcileError(
+            f"root {run['id']} exhausted {MAX_RERUN_ATTEMPTS} attempts ({conclusion})"
+        )
+    verify_local_release(source_repo, release)
+    gh_lines(["run", "rerun", str(run["id"]), "-R", TARGET_REPO])
+    return f"rerun:{run['attempt'] + 1}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-repo", required=True)
+    parser.add_argument("--tag", default="")
+    args = parser.parse_args(argv)
+    try:
+        releases = published_intents(args.source_repo, args.tag)
+        if not releases:
+            print("no published downstream intents")
+            return 0
+        runs = target_runs()
+        failures = []
+        for release in releases:
+            try:
+                result = reconcile_one(args.source_repo, release, runs)
+                print(f"{release.tag}: {result}")
+            except (ContractError, ReconcileError, OSError) as exc:
+                failures.append(f"{release.tag}: {exc}")
+                print(f"::error::{release.tag}: {exc}", file=sys.stderr)
+        if failures:
+            raise ReconcileError(f"{len(failures)} downstream intent(s) failed reconciliation")
+        return 0
+    except (ContractError, ReconcileError, OSError) as exc:
+        print(f"downstream reconciliation error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

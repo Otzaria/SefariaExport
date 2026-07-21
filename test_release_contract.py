@@ -27,6 +27,12 @@ class ReleaseContractTest(unittest.TestCase):
         with self.assertRaises(release_contract.ContractError):
             release_contract.validate_metadata(metadata)
 
+    def test_metadata_rejects_boolean_schema_version(self):
+        metadata = self._metadata()
+        metadata["schema_version"] = True
+        with self.assertRaises(release_contract.ContractError):
+            release_contract.validate_metadata(metadata)
+
     def test_canonical_bytes_are_stable_and_utf8(self):
         left = {"z": 1, "א": "עברית"}
         right = {"א": "עברית", "z": 1}

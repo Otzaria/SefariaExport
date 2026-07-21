@@ -34,7 +34,39 @@ class ReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('--allow-initial-baseline "$ALLOW_INITIAL"', workflow)
         self.assertIn('echo "is_initial=$is_initial" >> "$GITHUB_OUTPUT"', workflow)
         self.assertIn("if: steps.previous.outputs.is_initial == 'false'", workflow)
-        self.assertEqual(1, workflow.count("if: steps.previous.outputs.is_initial == 'false'"))
+        self.assertEqual(2, workflow.count("if: steps.previous.outputs.is_initial == 'false'"))
+
+    def test_distinct_exports_use_the_durable_pending_queue(self):
+        root = Path(__file__).resolve().parent
+        workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("group: sefaria-export-release", workflow)
+        self.assertIn("queue: max", workflow)
+
+    def test_published_release_carries_a_durable_downstream_intent(self):
+        root = Path(__file__).resolve().parent
+        workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 downstream_intent.py build", workflow)
+        self.assertIn('intent_assets+=("$INTENT_ASSET")', workflow)
+        self.assertIn("python3 downstream_intent.py validate", workflow)
+        self.assertIn(
+            'python3 reconcile_downstream.py --source-repo "$SOURCE_REPO" --tag "$TAG"',
+            workflow,
+        )
+        self.assertNotIn("for attempt in 1 2 3", workflow)
+
+    def test_scheduled_reconciler_recovers_missing_root(self):
+        root = Path(__file__).resolve().parent
+        workflow = (root / ".github/workflows/reconcile-downstream.yml").read_text(encoding="utf-8")
+        self.assertIn("schedule:", workflow)
+        self.assertIn("python3 reconcile_downstream.py", workflow)
+        self.assertIn("secrets.PIPELINE_TOKEN", workflow)
+
+    def test_weekly_dispatch_has_an_exact_adoptable_identity(self):
+        root = Path(__file__).resolve().parent
+        workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("orchestration_id:", workflow)
+        self.assertIn("Sefaria immutable export orchestration=${{ inputs.orchestration_id", workflow)
+        self.assertIn("^weekly:[1-9][0-9]*:[1-9][0-9]*$", workflow)
 
 
 if __name__ == "__main__":
