@@ -64,12 +64,60 @@ def version_lines(versions):
     return out
 
 
+def build_changes_post(diff, date):
+    """'שינויים בספרים' post: renames, moves, content updates, removals."""
+    books = diff.get("books", {})
+    removed = sorted({he_of(b) for b in books.get("removed", [])})
+    content = sorted({he_of(b) for b in books.get("content_changed", [])})
+    renamed = rename_lines(books.get("he_renamed", []), books.get("en_renamed", []))
+    moved = sorted(move_lines(books.get("moved", [])))
+
+    has_content = bool(renamed or moved or content or removed)
+
+    parts = [f"# עדכון ספריית ספריא (Sefaria) — שינויים בספרים\n", f"**עדכון {date}**\n"]
+    if renamed:
+        parts.append(f"\n## שינויי שם (שם קודם ⟶ שם חדש):\n{bullets(renamed)}\n")
+    if moved:
+        parts.append(f"\n## ספרים שהועברו:\n{bullets(moved)}\n")
+    if content:
+        parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(content)}\n")
+    if removed:
+        parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed)}\n")
+    if not has_content:
+        parts.append("\nאין שינויים בספרים קיימים בעדכון זה.\n")
+    return "".join(parts), has_content
+
+
+def build_new_books_post(diff, date):
+    """'ספרים חדשים' post: newly added books and new editions/versions."""
+    books = diff.get("books", {})
+    added = sorted({he_of(b) for b in books.get("added", [])})
+    versions = version_lines(diff.get("versions", {}).get("added", []))
+
+    has_content = bool(added or versions)
+
+    parts = [f"# עדכון ספריית ספריא (Sefaria) — ספרים חדשים\n", f"**עדכון {date}**\n"]
+    if added:
+        parts.append(f"\n## ספרים חדשים:\n{bullets(added)}\n")
+    if versions:
+        # Pasteable `book | versionTitle` lines for triage into black_versions.txt.
+        block = "\n".join(versions)
+        parts.append(f"\n## גרסאות (מהדורות) חדשות:\n```\n{block}\n```\n")
+    if not has_content:
+        parts.append("\nאין ספרים חדשים בעדכון זה.\n")
+    return "".join(parts), has_content
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("diff_json")
     ap.add_argument("--titles", default="", help="current release titles.json (unused; kept for compat)")
     ap.add_argument("--prev-titles", default="", help="previous release titles.json (unused; kept for compat)")
-    ap.add_argument("--topic", type=int, default=int(os.getenv("FORUM_TOPIC_ID", "1617")))
+    ap.add_argument("--topic", type=int, default=int(os.getenv("FORUM_TOPIC_ID", "1617")),
+                    help="topic id for the 'changes to existing books' thread")
+    ap.add_argument("--new-books-topic", type=int,
+                    default=int(os.getenv("FORUM_NEW_BOOKS_TOPIC_ID", "1994")),
+                    help="topic id for the 'new books' thread")
     ap.add_argument("--tag", default="")
     args = ap.parse_args()
 
@@ -81,44 +129,28 @@ def main():
         print("⏭️  Initial release (no baseline) — skipping forum post.")
         return 0
 
-    books = diff.get("books", {})
-    added = sorted({he_of(b) for b in books.get("added", [])})
-    removed = sorted({he_of(b) for b in books.get("removed", [])})
-    content = sorted({he_of(b) for b in books.get("content_changed", [])})
-    renamed = rename_lines(books.get("he_renamed", []), books.get("en_renamed", []))
-    moved = sorted(move_lines(books.get("moved", [])))
-    versions = version_lines(diff.get("versions", {}).get("added", []))
+    date = heb_date()
+    tag = args.tag or diff.get("new_tag", "")
 
-    if not (added or removed or content or renamed or moved or versions):
+    changes_text, has_changes = build_changes_post(diff, date)
+    new_books_text, has_new_books = build_new_books_post(diff, date)
+
+    if not (has_changes or has_new_books):
         print("⏭️  No book changes — skipping forum post.")
         return 0
 
-    date = heb_date()
-    tag = args.tag or diff.get("new_tag", "")
-    parts = [f"# עדכון ספריית ספריא (Sefaria)\n", f"**עדכון {date}**\n"]
-    if added:
-        parts.append(f"\n## ספרים חדשים:\n{bullets(added)}\n")
-    if renamed:
-        parts.append(f"\n## שינויי שם (שם קודם ⟶ שם חדש):\n{bullets(renamed)}\n")
-    if moved:
-        parts.append(f"\n## ספרים שהועברו:\n{bullets(moved)}\n")
-    if content:
-        parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(content)}\n")
-    if removed:
-        parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed)}\n")
-    if versions:
-        # Pasteable `book | versionTitle` lines for triage into black_versions.txt.
-        block = "\n".join(versions)
-        parts.append(f"\n## גרסאות (מהדורות) חדשות:\n```\n{block}\n```\n")
-
     repo = os.getenv("GITHUB_REPOSITORY")
-    if repo and tag:
-        parts.append(f"\n[להורדת העדכון](https://github.com/{repo}/releases/tag/{tag})\n")
+    footer = f"\n[להורדת העדכון](https://github.com/{repo}/releases/tag/{tag})\n" if (repo and tag) else ""
 
-    content_text = "".join(parts)
-    print("----- forum post -----")
-    print(content_text)
-    print("----------------------")
+    posts = [
+        ("שינויים בספרים", args.topic, changes_text + footer),
+        ("ספרים חדשים", args.new_books_topic, new_books_text + footer),
+    ]
+
+    for label, topic_id, text in posts:
+        print(f"----- forum post ({label}, topic {topic_id}) -----")
+        print(text)
+        print("----------------------")
 
     # Content is always printed above; only the send is gated.
     if not truthy(os.getenv("POST_TO_FORUM")):
@@ -134,10 +166,12 @@ def main():
     client = OtzariaForumClient(username.strip().replace(" ", "+"), password.strip())
     try:
         client.login()
-        resp = client.send_post(content_text, args.topic)
-        print(f"✅ Posted to forum topic {args.topic}: {str(resp)[:200]}")
-    except Exception as e:  # non-fatal
-        print(f"⚠️  Forum post failed (non-fatal): {e}")
+        for label, topic_id, text in posts:
+            try:
+                resp = client.send_post(text, topic_id)
+                print(f"✅ Posted to forum topic {topic_id} ({label}): {str(resp)[:200]}")
+            except Exception as e:  # non-fatal
+                print(f"⚠️  Forum post failed for {label} (non-fatal): {e}")
     finally:
         try:
             client.logout()

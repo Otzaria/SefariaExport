@@ -283,7 +283,7 @@ jobs:
           PASSWORD: ${{ secrets.PASSWORD }}
           POST_TO_FORUM: "true"
           TAG: ${{ steps.release.outputs.tag }}
-        run: python3 post_to_forum.py forum_changelog_diff.json --tag "$TAG" --topic "${FORUM_TOPIC_ID:-1617}" --titles titles.json --prev-titles prev_titles.json
+        run: python3 post_to_forum.py forum_changelog_diff.json --tag "$TAG" --topic "${FORUM_TOPIC_ID:-1617}" --new-books-topic "${FORUM_NEW_BOOKS_TOPIC_ID:-1994}" --titles titles.json --prev-titles prev_titles.json
 
       - name: Dispatch exact manual-link synchronization
         if: steps.previous.outputs.is_initial == 'false'
