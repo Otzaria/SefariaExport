@@ -1,4 +1,4 @@
-name: Reconcile downstream release intents
+name: Recovery guard · Deliver Sefaria downstream intent (not a build stage)
 
 run-name: reconcile Sefaria downstream intents ${{ github.run_id }}-${{ github.run_attempt }}
 

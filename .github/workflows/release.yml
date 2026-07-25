@@ -1,4 +1,4 @@
-name: Sefaria Export via Docker Compose
+name: Weekly 2/6 · Export and publish immutable Sefaria
 
 run-name: Sefaria immutable export orchestration=${{ inputs.orchestration_id || format('standalone:{0}:{1}', github.run_id, github.run_attempt) }}
 
