@@ -44,6 +44,10 @@ class ReconcileError(RuntimeError):
     pass
 
 
+class ExhaustedIntent(ReconcileError):
+    """A downstream root already emitted its bounded failure attempts."""
+
+
 def parse_github_timestamp(value: str) -> dt.datetime:
     if not isinstance(value, str) or not GITHUB_TIMESTAMP_RE.fullmatch(value):
         raise ReconcileError(f"invalid GitHub UTC timestamp: {value!r}")
@@ -317,7 +321,7 @@ def reconcile_one(source_repo: str, release: ReleaseIntent, runs: dict[str, list
     if conclusion == "success":
         return "complete"
     if run["attempt"] >= MAX_RERUN_ATTEMPTS:
-        raise ReconcileError(
+        raise ExhaustedIntent(
             f"root {run['id']} exhausted {MAX_RERUN_ATTEMPTS} attempts ({conclusion})"
         )
     verify_local_release(source_repo, release)
@@ -341,6 +345,17 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 result = reconcile_one(args.source_repo, release, runs)
                 print(f"{release.tag}: {result}")
+            except ExhaustedIntent as exc:
+                # A scheduled full-store scan has already reported this root's
+                # bounded failures through the root runs themselves.  Treat it
+                # as a dead-letter terminal state so every future timer tick
+                # does not send another identical failure notification.  An
+                # operator targeting the exact tag still gets a hard failure.
+                if args.tag:
+                    failures.append(f"{release.tag}: {exc}")
+                    print(f"::error::{release.tag}: {exc}", file=sys.stderr)
+                else:
+                    print(f"::warning::{release.tag}: terminal dead letter: {exc}")
             except (ContractError, ReconcileError, OSError) as exc:
                 failures.append(f"{release.tag}: {exc}")
                 print(f"::error::{release.tag}: {exc}", file=sys.stderr)

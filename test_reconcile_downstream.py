@@ -1,5 +1,7 @@
+import io
 import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 import reconcile_downstream as reconciler
@@ -105,7 +107,7 @@ class ReconcileDownstreamTest(unittest.TestCase):
     @mock.patch.object(reconciler, "verify_local_release")
     def test_exhausted_or_duplicate_roots_fail_closed(self, verify):
         release = self.release()
-        with self.assertRaises(reconciler.ReconcileError):
+        with self.assertRaises(reconciler.ExhaustedIntent):
             reconciler.reconcile_one(
                 "Otzaria/SefariaExport",
                 release,
@@ -118,6 +120,38 @@ class ReconcileDownstreamTest(unittest.TestCase):
                 {release.root_title: [self.root_run(), self.root_run(id=988)]},
             )
         verify.assert_not_called()
+
+    @mock.patch.object(reconciler, "target_runs")
+    @mock.patch.object(reconciler, "published_intents")
+    def test_full_scan_dead_letters_exhausted_but_exact_tag_fails(
+        self, published_intents, target_runs
+    ):
+        release = self.release()
+        failed = self.root_run(conclusion="failure", attempt=3)
+        published_intents.return_value = [release]
+        target_runs.return_value = {release.root_title: [failed]}
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            result = reconciler.main(["--source-repo", "Otzaria/SefariaExport"])
+        self.assertEqual(0, result)
+        self.assertIn("terminal dead letter", stdout.getvalue())
+        self.assertEqual("", stderr.getvalue())
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            result = reconciler.main(
+                [
+                    "--source-repo",
+                    "Otzaria/SefariaExport",
+                    "--tag",
+                    release.tag,
+                ]
+            )
+        self.assertEqual(1, result)
+        self.assertIn("exhausted 3 attempts", stderr.getvalue())
 
     def test_prepublication_or_non_dispatch_root_is_rejected(self):
         release = self.release()
