@@ -303,6 +303,17 @@ def dispatch(intent: dict) -> None:
 def reconcile_one(source_repo: str, release: ReleaseIntent, runs: dict[str, list[dict]]) -> str:
     exact = runs.get(release.root_title, [])
     if len(exact) > 1:
+        # A bounded operator recovery may create a second root with the same
+        # immutable correlation after the original root fails.  Once any exact
+        # root succeeds, downstream delivery is complete and future scheduled
+        # scans must not keep failing on the now-harmless duplicate history.
+        for run in exact:
+            run_matches_release(run, release)
+        if any(
+            run["status"] == "completed" and run["conclusion"] == "success"
+            for run in exact
+        ):
+            return "complete"
         raise ReconcileError(
             f"release {release.tag} has {len(exact)} exact roots; refusing to choose"
         )

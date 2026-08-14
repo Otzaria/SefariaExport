@@ -117,8 +117,29 @@ class ReconcileDownstreamTest(unittest.TestCase):
             reconciler.reconcile_one(
                 "Otzaria/SefariaExport",
                 release,
-                {release.root_title: [self.root_run(), self.root_run(id=988)]},
+                {
+                    release.root_title: [
+                        self.root_run(conclusion="failure"),
+                        self.root_run(id=988, conclusion="cancelled"),
+                    ]
+                },
             )
+        verify.assert_not_called()
+
+    @mock.patch.object(reconciler, "verify_local_release")
+    def test_duplicate_roots_are_complete_after_exact_recovery_succeeds(self, verify):
+        release = self.release()
+        result = reconciler.reconcile_one(
+            "Otzaria/SefariaExport",
+            release,
+            {
+                release.root_title: [
+                    self.root_run(conclusion="failure"),
+                    self.root_run(id=988),
+                ]
+            },
+        )
+        self.assertEqual("complete", result)
         verify.assert_not_called()
 
     @mock.patch.object(reconciler, "target_runs")
