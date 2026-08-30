@@ -200,14 +200,20 @@ def _side_mask(anchor, other, anchor_ref, perek_refs, parasha_refs) -> int:
     return mask
 
 
-def _sefaria_project_sha() -> str:
-    """The Sefaria-Project checkout whose helpers produced the masks."""
+def _sefaria_project_sha(project_dir=None) -> str:
+    """The exact Sefaria-Project checkout whose helpers produced the masks."""
+    import subprocess
+
+    cwd = project_dir or os.getcwd()
     try:
-        with open("Sefaria-Project.sha", encoding="utf-8") as fh:
-            sha = fh.read().strip()
-    except OSError:
-        return ""
-    return sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else ""
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, stderr=subprocess.STDOUT
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"cannot resolve Sefaria-Project commit at {cwd}: {exc}") from exc
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise RuntimeError(f"invalid Sefaria-Project commit returned by git: {sha!r}")
+    return sha
 
 
 def run_links_export_extended() -> None:
@@ -243,7 +249,7 @@ def run_links_export_extended() -> None:
     perek_refs = get_talmud_perek_ref_set()
     parasha_refs = get_parasha_ref_set()
     print(f"Link visibility: {len(perek_refs)} perek refs, {len(parasha_refs)} parasha refs")
-    suppressed_by_bit = Counter()
+    suppressed_by_side_and_bit = Counter()
     suppressed_sides = Counter()
 
     export_base = os.environ["SEFARIA_EXPORT_PATH"]
@@ -318,7 +324,7 @@ def run_links_export_extended() -> None:
                 suppressed_sides[side] += 1
                 for bit, name in SUPPRESSION_BITS.items():
                     if mask & bit:
-                        suppressed_by_bit[name] += 1
+                        suppressed_by_side_and_bit[(side, name)] += 1
 
         link_type = link.get("type", "")
         writer.writerow([
@@ -368,16 +374,23 @@ def run_links_export_extended() -> None:
 
     meta_dir = os.path.join(export_base, "metadata")
     os.makedirs(meta_dir, exist_ok=True)
+    sefaria_project_sha = _sefaria_project_sha()
     visibility = {
         "schema_version": 1,
-        "sefaria_project_sha": _sefaria_project_sha(),
+        "sefaria_project_sha": sefaria_project_sha,
         "mask_bits": {str(bit): name for bit, name in SUPPRESSION_BITS.items()},
         "counts": {
             "perek_refs": len(perek_refs),
             "parasha_refs": len(parasha_refs),
             "suppressed_side_1": suppressed_sides[1],
             "suppressed_side_2": suppressed_sides[2],
-            "suppressed_by_bit": dict(sorted(suppressed_by_bit.items())),
+            "suppressed_by_side_and_bit": {
+                str(side): {
+                    name: suppressed_by_side_and_bit[(side, name)]
+                    for name in sorted(SUPPRESSION_BITS.values())
+                }
+                for side in (1, 2)
+            },
         },
         "perek_refs_sha256": digest(perek_refs),
         "parasha_refs_sha256": digest(parasha_refs),
@@ -390,8 +403,8 @@ def run_links_export_extended() -> None:
     print(f"✅ links export done: charLevelData={field_counts['charLevelData']}, "
           f"malformed={field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
     print(f"   visibility: sides suppressed 1={suppressed_sides[1]} 2={suppressed_sides[2]}, "
-          f"by bit={dict(sorted(suppressed_by_bit.items()))}, "
-          f"sefaria={_sefaria_project_sha()[:12] or 'unknown'}")
+          f"by side/bit={dict(sorted(suppressed_by_side_and_bit.items()))}, "
+          f"sefaria={sefaria_project_sha[:12]}")
 
 
 def flatten_hebrew_dirs(export_base: str) -> None:

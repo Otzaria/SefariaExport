@@ -7,8 +7,12 @@ set -euo pipefail
 # get_links() helpers, so the commit behind them has to be recorded.
 REF="${SEFARIA_PROJECT_REF:-}"
 
-if [ -d "Sefaria-Project" ]; then
-  echo "Sefaria-Project already exists, skipping clone"
+if [ -d "Sefaria-Project" ] && [ -n "$REF" ]; then
+  echo "Updating existing Sefaria-Project checkout to pinned ref $REF"
+  git -C Sefaria-Project fetch -q --depth 1 origin "$REF"
+  git -C Sefaria-Project checkout -q --detach FETCH_HEAD
+elif [ -d "Sefaria-Project" ]; then
+  echo "Sefaria-Project already exists, using its current checkout"
 elif [ -n "$REF" ]; then
   echo "Cloning Sefaria-Project pinned at $REF"
   git init -q Sefaria-Project

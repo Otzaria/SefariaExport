@@ -5,13 +5,19 @@ These run without a Sefaria checkout — the helpers only touch `.sections` and
 one is the second filter: it measures the OTHER side against the OTHER side's
 own depth, not the anchor's.
 """
+import tempfile
+import json
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from run_exports import (
     SUPPRESS_ANCHOR_NOT_SEGMENT,
     SUPPRESS_OTHER_TOO_COARSE,
     SUPPRESS_WHOLE_PEREK,
     SUPPRESS_WHOLE_PARASHA,
+    SUPPRESSION_BITS,
+    _sefaria_project_sha,
     _side_mask,
 )
 
@@ -28,6 +34,16 @@ class StubRef:
 
 
 class SideMaskTest(unittest.TestCase):
+    def test_mask_names_match_the_cross_repo_contract(self):
+        contract = json.loads(
+            (Path(__file__).parent / "link_visibility_contract_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(contract["schemaVersion"], 1)
+        self.assertEqual(
+            contract["maskBits"],
+            {str(bit): name for bit, name in SUPPRESSION_BITS.items()},
+        )
+
     def test_segment_level_link_is_displayed(self):
         anchor = StubRef([28, 1], 2)      # Bava Batra 28a:1
         other = StubRef([5, 1], 2)        # Migdal Oz 5:1
@@ -99,31 +115,49 @@ class MergeRuleTest(unittest.TestCase):
     SeforimLibrary derives one `link` row from (sourceLineId, targetLineId,
     connectionTypeId), so several CSV rows collapse onto one linkId — measured
     at ~78K rows for OTHER alone. A merged side may only be suppressed when
-    EVERY contributing row is suppressed, i.e. the masks are AND-ed.
+    EVERY contributing row is suppressed. Reasons are diagnostic and are
+    therefore OR-ed only after that independent visibility decision.
     """
 
     @staticmethod
     def merged(*masks):
-        result = masks[0]
-        for m in masks[1:]:
-            result &= m
+        if any(mask == 0 for mask in masks):
+            return 0
+        result = 0
+        for mask in masks:
+            result |= mask
         return result
 
     def test_one_visible_contribution_keeps_the_side_visible(self):
         self.assertEqual(self.merged(SUPPRESS_WHOLE_PEREK, 0), 0)
 
-    def test_all_suppressed_keeps_only_the_shared_reasons(self):
+    def test_all_suppressed_keeps_all_reasons(self):
         self.assertEqual(
             self.merged(
                 SUPPRESS_WHOLE_PEREK | SUPPRESS_ANCHOR_NOT_SEGMENT,
                 SUPPRESS_WHOLE_PEREK,
             ),
-            SUPPRESS_WHOLE_PEREK,
+            SUPPRESS_WHOLE_PEREK | SUPPRESS_ANCHOR_NOT_SEGMENT,
         )
 
-    def test_disjoint_reasons_cancel(self):
-        """Suppressed for different reasons is not agreement — the side shows."""
-        self.assertEqual(self.merged(SUPPRESS_WHOLE_PEREK, SUPPRESS_WHOLE_PARASHA), 0)
+    def test_disjoint_reasons_still_suppress(self):
+        self.assertEqual(
+            self.merged(SUPPRESS_WHOLE_PEREK, SUPPRESS_WHOLE_PARASHA),
+            SUPPRESS_WHOLE_PEREK | SUPPRESS_WHOLE_PARASHA,
+        )
+
+
+class SefariaProjectShaTest(unittest.TestCase):
+    def test_reads_the_checkout_commit_from_git(self):
+        sha = "a" * 40
+        with mock.patch("subprocess.check_output", return_value=sha + "\n") as call:
+            self.assertEqual(_sefaria_project_sha(Path("/checkout")), sha)
+        self.assertEqual(call.call_args.kwargs["cwd"], Path("/checkout"))
+
+    def test_missing_or_invalid_sha_fails_closed(self):
+        with mock.patch("subprocess.check_output", return_value="\n"):
+            with self.assertRaisesRegex(RuntimeError, "invalid Sefaria-Project commit"):
+                _sefaria_project_sha(Path(tempfile.gettempdir()))
 
 
 if __name__ == "__main__":
