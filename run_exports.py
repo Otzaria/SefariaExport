@@ -14,6 +14,7 @@ to running the full upstream export.
 import os
 import sys
 import traceback
+from pathlib import Path
 
 
 def list_dir_limited(base: str) -> None:
@@ -204,7 +205,10 @@ def _sefaria_project_sha(project_dir=None) -> str:
     """The exact Sefaria-Project checkout whose helpers produced the masks."""
     import subprocess
 
-    cwd = project_dir or os.getcwd()
+    # The Docker entrypoint clones Sefaria beside this script under
+    # /app/Sefaria-Project; the process itself runs from /app, which is not a
+    # Git checkout. Never derive provenance from the caller's working dir.
+    cwd = project_dir or Path(__file__).resolve().parent / "Sefaria-Project"
     try:
         sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, stderr=subprocess.STDOUT

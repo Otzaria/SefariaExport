@@ -148,6 +148,15 @@ class MergeRuleTest(unittest.TestCase):
 
 
 class SefariaProjectShaTest(unittest.TestCase):
+    def test_default_checkout_is_next_to_the_export_script(self):
+        sha = "b" * 40
+        with mock.patch("subprocess.check_output", return_value=sha + "\n") as call:
+            self.assertEqual(_sefaria_project_sha(), sha)
+        self.assertEqual(
+            call.call_args.kwargs["cwd"],
+            Path(__file__).resolve().parent / "Sefaria-Project",
+        )
+
     def test_reads_the_checkout_commit_from_git(self):
         sha = "a" * 40
         with mock.patch("subprocess.check_output", return_value=sha + "\n") as call:
