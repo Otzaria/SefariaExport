@@ -63,7 +63,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate release tooling
-        run: python3 -m unittest -v test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_resolve_release_chain_head.py test_release_workflow_contract.py
+        run: python3 -m unittest -v test_link_visibility.py test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_resolve_release_chain_head.py test_release_workflow_contract.py
 
       - name: Validate optional orchestration identity
         env:

@@ -4,6 +4,12 @@ from pathlib import Path
 
 
 class ReleaseWorkflowContractTest(unittest.TestCase):
+    def test_link_visibility_contract_runs_in_release_validation(self):
+        root = Path(__file__).resolve().parent
+        for relative in (".github/workflows/release.yml", ".github/workflows/reconcile-downstream.yml"):
+            workflow = (root / relative).read_text(encoding="utf-8")
+            self.assertIn("test_link_visibility.py", workflow, relative)
+
     def test_legacy_release_mutators_fail_closed(self):
         root = Path(__file__).resolve().parent
         for name in ("20_create_or_update_release.sh", "21_upload_release_assets.sh"):

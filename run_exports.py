@@ -157,6 +157,65 @@ def run_versions_export_he_only(ex) -> None:
           f"skipped={skipped}, errors={errored}")
 
 
+# Link-visibility bits. Mirrors the three display filters Sefaria applies in
+# `get_links()` (sefaria/client/wrapper.py). A side with mask 0 is displayed.
+SUPPRESS_ANCHOR_NOT_SEGMENT = 1
+SUPPRESS_OTHER_TOO_COARSE = 2
+SUPPRESS_WHOLE_PEREK = 4
+SUPPRESS_WHOLE_PARASHA = 8
+
+SUPPRESSION_BITS = {
+    SUPPRESS_ANCHOR_NOT_SEGMENT: "anchor_not_segment_level",
+    SUPPRESS_OTHER_TOO_COARSE: "other_side_too_coarse",
+    SUPPRESS_WHOLE_PEREK: "whole_talmud_perek",
+    SUPPRESS_WHOLE_PARASHA: "whole_parasha",
+}
+
+
+def _node_depth(oref):
+    """`index_node.depth`, or None when the node can't supply one."""
+    try:
+        return getattr(oref.index_node, "depth", None)
+    except Exception:
+        return None
+
+
+def _side_mask(anchor, other, anchor_ref, perek_refs, parasha_refs) -> int:
+    """Why Sefaria would refuse to surface this link on `anchor`'s side.
+
+    Each bit is one `continue` in get_links(). Note the second filter measures
+    the OTHER side against the OTHER side's own depth, not the anchor's.
+    """
+    mask = 0
+    depth = _node_depth(anchor)
+    if depth is None or len(anchor.sections) != depth:
+        mask |= SUPPRESS_ANCHOR_NOT_SEGMENT
+    other_depth = _node_depth(other)
+    if other_depth is None or len(other.sections) + 1 < other_depth:
+        mask |= SUPPRESS_OTHER_TOO_COARSE
+    if anchor_ref in perek_refs:
+        mask |= SUPPRESS_WHOLE_PEREK
+    if anchor_ref in parasha_refs:
+        mask |= SUPPRESS_WHOLE_PARASHA
+    return mask
+
+
+def _sefaria_project_sha(project_dir=None) -> str:
+    """The exact Sefaria-Project checkout whose helpers produced the masks."""
+    import subprocess
+
+    cwd = project_dir or os.getcwd()
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, stderr=subprocess.STDOUT
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"cannot resolve Sefaria-Project commit at {cwd}: {exc}") from exc
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise RuntimeError(f"invalid Sefaria-Project commit returned by git: {sha!r}")
+    return sha
+
+
 def run_links_export_extended() -> None:
     """Replacement for `ex.export_links()` — adds word-level anchor fields.
 
@@ -175,13 +234,23 @@ def run_links_export_extended() -> None:
     Consumers that index columns by header name are unaffected by the
     trailing additions.
     """
+    import hashlib
     import json
     import unicodecsv as csv
     from collections import Counter
 
+    from sefaria.helper.text import get_parasha_ref_set, get_talmud_perek_ref_set
     from sefaria.model.text import Ref
     from sefaria.system.database import db
     from sefaria.system.exceptions import InputError
+
+    # Authoritative sets, straight from Sefaria's own helpers. Hoisted out of
+    # the row loop: they are lru_cached but this runs millions of times.
+    perek_refs = get_talmud_perek_ref_set()
+    parasha_refs = get_parasha_ref_set()
+    print(f"Link visibility: {len(perek_refs)} perek refs, {len(parasha_refs)} parasha refs")
+    suppressed_by_side_and_bit = Counter()
+    suppressed_sides = Counter()
 
     export_base = os.environ["SEFARIA_EXPORT_PATH"]
 
@@ -218,6 +287,8 @@ def run_links_export_extended() -> None:
                     "Category 2",
                     "Char Level Data 1",
                     "Char Level Data 2",
+                    "Suppression Mask 1",
+                    "Suppression Mask 2",
             ])
             link_file_number += 1
 
@@ -244,6 +315,17 @@ def run_links_export_extended() -> None:
             field_counts["charLevelData_malformed"] += 1
             print(f"⚠️  malformed charLevelData on {link['refs']}: {char_level!r}")
 
+        # Per-side visibility, decided here because this is the only place the
+        # TermSet, index_node depths and both Refs exist together.
+        mask1 = _side_mask(oref1, oref2, refs[0], perek_refs, parasha_refs)
+        mask2 = _side_mask(oref2, oref1, refs[1], perek_refs, parasha_refs)
+        for side, mask in ((1, mask1), (2, mask2)):
+            if mask:
+                suppressed_sides[side] += 1
+                for bit, name in SUPPRESSION_BITS.items():
+                    if mask & bit:
+                        suppressed_by_side_and_bit[(side, name)] += 1
+
         link_type = link.get("type", "")
         writer.writerow([
             refs[0],
@@ -255,6 +337,8 @@ def run_links_export_extended() -> None:
             oref2.index.categories[0],
             char_cells[0],
             char_cells[1],
+            mask1,
+            mask2,
         ])
 
         book_link = tuple(sorted([oref1.index.title, oref2.index.title]))
@@ -283,8 +367,44 @@ def run_links_export_extended() -> None:
     write_aggregate_file(links_by_book, "links_by_book.csv")
     write_aggregate_file(links_by_book_without_commentary, "links_by_book_without_commentary.csv")
 
+    # QA sidecar. NOT the source of the decision — that ships per row above —
+    # but it lets a consumer verify its own derivation against Sefaria's sets.
+    def digest(refs_set) -> str:
+        return hashlib.sha256("\n".join(sorted(refs_set)).encode("utf-8")).hexdigest()
+
+    meta_dir = os.path.join(export_base, "metadata")
+    os.makedirs(meta_dir, exist_ok=True)
+    sefaria_project_sha = _sefaria_project_sha()
+    visibility = {
+        "schema_version": 1,
+        "sefaria_project_sha": sefaria_project_sha,
+        "mask_bits": {str(bit): name for bit, name in SUPPRESSION_BITS.items()},
+        "counts": {
+            "perek_refs": len(perek_refs),
+            "parasha_refs": len(parasha_refs),
+            "suppressed_side_1": suppressed_sides[1],
+            "suppressed_side_2": suppressed_sides[2],
+            "suppressed_by_side_and_bit": {
+                str(side): {
+                    name: suppressed_by_side_and_bit[(side, name)]
+                    for name in sorted(SUPPRESSION_BITS.values())
+                }
+                for side in (1, 2)
+            },
+        },
+        "perek_refs_sha256": digest(perek_refs),
+        "parasha_refs_sha256": digest(parasha_refs),
+        "perek_refs": sorted(perek_refs),
+        "parasha_refs": sorted(parasha_refs),
+    }
+    with open(os.path.join(meta_dir, "link-visibility-v1.json"), "w", encoding="utf-8") as vf:
+        json.dump(visibility, vf, ensure_ascii=False, indent=2, sort_keys=True)
+
     print(f"✅ links export done: charLevelData={field_counts['charLevelData']}, "
           f"malformed={field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
+    print(f"   visibility: sides suppressed 1={suppressed_sides[1]} 2={suppressed_sides[2]}, "
+          f"by side/bit={dict(sorted(suppressed_by_side_and_bit.items()))}, "
+          f"sefaria={sefaria_project_sha[:12]}")
 
 
 def flatten_hebrew_dirs(export_base: str) -> None:
