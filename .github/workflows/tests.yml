@@ -14,5 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The forum client is imported by test_post_to_forum.py, so its runtime
+      # dependencies have to exist before the suite runs.
+      - name: Install test dependencies
+        run: python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata
+
       - name: Run exporter and release-tool tests
         run: python3 -m unittest discover -v

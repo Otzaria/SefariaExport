@@ -4,6 +4,34 @@ import re
 import uuid
 
 
+class ForumPostError(RuntimeError):
+    """The forum answered the request but refused to create the post.
+
+    NodeBB reports a refused post in the JSON body (`status.code`), not only in
+    the HTTP status, so a caller that looks at the transport alone treats every
+    refusal as a success.  `retryable` marks the per-user post-rate refusal —
+    the one case where the very same post succeeds once enough time has passed.
+    """
+
+    # otzaria.org answers in Hebrew; the bracketed ids are NodeBB's own
+    # untranslated error keys, kept so a locale change cannot silence the retry.
+    _RATE_LIMIT_MARKERS = (
+        "ניתן לפרסם פוסט רק פעם ב",
+        "too-many-posts",
+        "still-posting",
+    )
+
+    def __init__(self, code, message, payload=None):
+        super().__init__(f"{code}: {message}" if message else str(code))
+        self.code = code
+        self.message = message or ""
+        self.payload = payload
+
+    @property
+    def retryable(self):
+        return any(marker in self.message for marker in self._RATE_LIMIT_MARKERS)
+
+
 class OtzariaForumClient:
     def __init__(self, username, password):
         self.base_url = "https://otzaria.org/forum"
@@ -57,6 +85,7 @@ class OtzariaForumClient:
         print("Login successful")
 
     def send_post(self, content, topic_id, to_pid=None):
+        """Create a post, or raise ForumPostError if the forum refused it."""
         post_url = f"{self.base_url}/api/v3/topics/{topic_id}"
         post_headers = self.headers.copy()
         post_headers.update({
@@ -71,7 +100,22 @@ class OtzariaForumClient:
             "toPid": to_pid,
         }
         response = self.session.post(post_url, json=data, headers=post_headers)
-        return response.json()
+        try:
+            payload = response.json()
+        except ValueError:
+            raise ForumPostError(
+                f"http-{response.status_code}",
+                f"non-JSON response: {response.text[:200]!r}",
+            ) from None
+        status = payload.get("status") if isinstance(payload, dict) else None
+        code = (status or {}).get("code")
+        if code != "ok":
+            raise ForumPostError(
+                code or f"http-{response.status_code}",
+                (status or {}).get("message", ""),
+                payload,
+            )
+        return payload
 
     def logout(self):
         logout_url = f"{self.base_url}/logout"
