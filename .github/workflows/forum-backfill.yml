@@ -76,7 +76,12 @@ jobs:
           [[ ${#tags[@]} -gt 0 ]]
           rm -rf backfill && mkdir backfill
           failures=0
+          first=1
           for tag in "${tags[@]}"; do
+            # Each tag is its own post_to_forum.py run, so the in-process delay
+            # does not span them: space the tags here or the second one walks
+            # straight into the post-rate window this workflow exists to dodge.
+            if [[ "$first" -eq 0 ]]; then sleep 5; else first=0; fi
             [[ "$tag" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]+-[0-9]+$ ]] || {
               echo "❌ '$tag' is not an immutable export tag"; exit 1; }
             dir="backfill/$tag"
