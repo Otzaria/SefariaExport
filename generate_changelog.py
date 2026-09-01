@@ -325,6 +325,9 @@ def main():
                     help="exports dir; read to resolve exact versionTitle for new versions")
     ap.add_argument("--versions-blacklist", dest="versions_blacklist", default="",
                     help="black_versions.txt; already-listed versions are dropped from the output")
+    ap.add_argument("--short-md", dest="short_md", default="",
+                    help="also write a summary-only Markdown file (counts, no per-book lists) "
+                         "for use as the GitHub release body")
     args = ap.parse_args()
 
     old = load_manifest(args.old_manifest)
@@ -376,6 +379,8 @@ def main():
             f"- Total files in this release: **{len(new)}**",
         ]
         _write(args.out_md, "\n".join(lines))
+        if args.short_md:
+            _write(args.short_md, "\n".join(lines))
         print(f"✅ Changelog written (initial): {args.out_md}")
         return 0
 
@@ -401,6 +406,16 @@ def main():
         note.append("table of contents updated")
     if note:
         lines += ["_Also: " + ", ".join(note) + "._", ""]
+
+    # The release body stops here: the per-book lists below can run to hundreds
+    # of entries, and they are published to the forum (and to the CHANGELOG.md
+    # asset) instead of being pasted into the release notes.
+    if args.short_md:
+        _write(args.short_md, "\n".join(lines + [
+            "_Per-book detail is published to the Otzaria forum; the full list also ships "
+            "as the `CHANGELOG.md` asset of this release._",
+        ]))
+        print(f"✅ Short release notes written: {args.short_md}")
 
     def section(title, items, render):
         if items:

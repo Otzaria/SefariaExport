@@ -3,10 +3,17 @@
 import argparse
 import json
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Jerusalem")
+
+# The forum enforces a per-user delay between posts (currently 1s), so the
+# threads are written one after another with room to spare rather than in a
+# tight loop — the tight loop silently lost every second post.
+DEFAULT_POST_DELAY_SECONDS = 4.0
+DEFAULT_POST_ATTEMPTS = 4
 
 
 def truthy(val, default=True):
@@ -22,12 +29,18 @@ def load_json(path, fallback):
     return fallback
 
 
-def heb_date():
+def heb_date(day=None):
+    """Hebrew date string for `day` (default: today in Israel).
+
+    An explicit day matters when re-publishing a post for an older release:
+    the post must carry that release's date, not the day it was resent.
+    """
+    day = day or datetime.now(tz=TZ).date()
     try:
         from pyluach import dates
-        return dates.HebrewDate.from_pydate(datetime.now(tz=TZ).date()).hebrew_date_string()
+        return dates.HebrewDate.from_pydate(day).hebrew_date_string()
     except Exception:
-        return datetime.now(tz=TZ).strftime("%Y-%m-%d")
+        return day.strftime("%Y-%m-%d")
 
 
 def he_of(book, key="he"):
@@ -108,6 +121,74 @@ def build_new_books_post(diff, date):
     return "".join(parts), has_content
 
 
+def positive_number(name, default):
+    """A positive float from env var `name`, or `default` if unset/unusable."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"⚠️  {name}={raw!r} is not a number — using {default}.")
+        return default
+    if value <= 0:
+        print(f"⚠️  {name}={raw!r} is not positive — using {default}.")
+        return default
+    return value
+
+
+def send_posts(client, posts, delay=None, attempts=None):
+    """Send every post, spaced out; return the labels that never landed.
+
+    Two rules earn their keep here:
+
+      * posts are spaced by `delay`, and a refusal that names the forum's
+        post-rate window is retried with a growing backoff.  Without this the
+        second post of the run is rejected every single time.
+      * a transport error is NOT retried.  The post may well have been created
+        before the connection broke, and a blind retry would duplicate it in
+        the thread — a duplicate is worse than a reported miss.
+    """
+    from otzaria_forum import ForumPostError
+
+    delay = delay if delay is not None else positive_number(
+        "FORUM_POST_DELAY_SECONDS", DEFAULT_POST_DELAY_SECONDS)
+    attempts = int(attempts if attempts is not None else positive_number(
+        "FORUM_POST_ATTEMPTS", DEFAULT_POST_ATTEMPTS))
+    failed = []
+
+    for index, (label, topic_id, text) in enumerate(posts):
+        if index:
+            time.sleep(delay)
+        wait = delay
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = client.send_post(text, topic_id)
+            except ForumPostError as exc:
+                if exc.retryable and attempt < attempts:
+                    print(f"⏳ Forum post-rate refusal for {label} (topic {topic_id}), "
+                          f"attempt {attempt}/{attempts}: {exc.message} — "
+                          f"retrying in {wait:g}s", flush=True)
+                    time.sleep(wait)
+                    wait *= 2
+                    continue
+                print(f"❌ Forum post NOT created for {label} (topic {topic_id}) "
+                      f"after {attempt} attempt(s): {exc}")
+                failed.append(label)
+                break
+            except Exception as exc:  # transport, or anything else unexpected
+                print(f"❌ Forum post for {label} (topic {topic_id}) failed with an "
+                      f"undetermined outcome and was NOT retried "
+                      f"(it may or may not exist): {exc!r}")
+                failed.append(label)
+                break
+            url = (resp.get("response") or {}).get("url") or ""
+            print(f"✅ Posted to forum topic {topic_id} ({label}) {url}".rstrip())
+            break
+
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("diff_json")
@@ -119,7 +200,16 @@ def main():
                     default=int(os.getenv("FORUM_NEW_BOOKS_TOPIC_ID", "1994")),
                     help="topic id for the 'new books' thread")
     ap.add_argument("--tag", default="")
+    ap.add_argument("--only", choices=("both", "changes", "new-books"), default="both",
+                    help="which thread(s) to write; 'new-books' re-publishes only that post")
+    ap.add_argument("--as-of", dest="as_of", default="",
+                    help="YYYY-MM-DD to date the post by (default today); use the original "
+                         "release date when re-publishing a post that never landed")
     args = ap.parse_args()
+
+    as_of = None
+    if args.as_of:
+        as_of = datetime.strptime(args.as_of, "%Y-%m-%d").date()
 
     diff = load_json(args.diff_json, None)
     if not diff:
@@ -129,7 +219,7 @@ def main():
         print("⏭️  Initial release (no baseline) — skipping forum post.")
         return 0
 
-    date = heb_date()
+    date = heb_date(as_of)
     tag = args.tag or diff.get("new_tag", "")
 
     changes_text, has_changes = build_changes_post(diff, date)
@@ -142,10 +232,20 @@ def main():
     repo = os.getenv("GITHUB_REPOSITORY")
     footer = f"\n[להורדת העדכון](https://github.com/{repo}/releases/tag/{tag})\n" if (repo and tag) else ""
 
-    posts = [
-        ("שינויים בספרים", args.topic, changes_text + footer),
-        ("ספרים חדשים", args.new_books_topic, new_books_text + footer),
-    ]
+    posts = []
+    if args.only in ("both", "changes"):
+        posts.append(("שינויים בספרים", args.topic, changes_text + footer))
+    if args.only in ("both", "new-books"):
+        posts.append(("ספרים חדשים", args.new_books_topic, new_books_text + footer))
+
+    # A re-publish asks for one specific thread; writing "nothing new" into it
+    # would add noise to the very thread the miss was reported against.
+    if args.only == "new-books" and not has_new_books:
+        print("⏭️  Nothing new in this diff — not writing to the new-books thread.")
+        return 0
+    if args.only == "changes" and not has_changes:
+        print("⏭️  No changes in this diff — not writing to the changes thread.")
+        return 0
 
     for label, topic_id, text in posts:
         print(f"----- forum post ({label}, topic {topic_id}) -----")
@@ -166,17 +266,19 @@ def main():
     client = OtzariaForumClient(username.strip().replace(" ", "+"), password.strip())
     try:
         client.login()
-        for label, topic_id, text in posts:
-            try:
-                resp = client.send_post(text, topic_id)
-                print(f"✅ Posted to forum topic {topic_id} ({label}): {str(resp)[:200]}")
-            except Exception as e:  # non-fatal
-                print(f"⚠️  Forum post failed for {label} (non-fatal): {e}")
+        failed = send_posts(client, posts)
     finally:
         try:
             client.logout()
         except Exception:
             pass
+
+    if failed:
+        # The step is `continue-on-error`, so this never blocks a release — but
+        # a lost post now shows up red instead of hiding behind a ✅.
+        print(f"❌ {len(failed)} of {len(posts)} forum post(s) never landed: "
+              f"{', '.join(failed)}")
+        return 1
     return 0
 
 
