@@ -63,7 +63,9 @@ jobs:
           persist-credentials: false
 
       - name: Validate release tooling
-        run: python3 -m unittest -v test_link_visibility.py test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_resolve_release_chain_head.py test_release_workflow_contract.py
+        run: |
+          python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata
+          python3 -m unittest -v test_link_visibility.py test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_resolve_release_chain_head.py test_release_workflow_contract.py test_post_to_forum.py
 
       - name: Validate optional orchestration identity
         env:
@@ -213,7 +215,7 @@ jobs:
             --draft \
             --target "$GITHUB_SHA" \
             --title "Sefaria Export $TAG" \
-            --notes-file CHANGELOG.md
+            --notes-file RELEASE_NOTES.md
           mapfile -t archive_names < <(jq -r '.archive.parts[].name' release_metadata.json)
           intent_assets=()
           if [[ -n "$INTENT_ASSET" ]]; then
