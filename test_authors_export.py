@@ -302,3 +302,37 @@ class AuthorsExportRobustnessTest(AuthorsExportTest):
         ])
         _query, projection = topics.queries[0]
         self.assertEqual({"slug": 1, "titles": 1, "_id": 0}, projection)
+
+
+class AuthorsChangelogVisibilityTest(unittest.TestCase):
+    """authors.json must not fall into the changelog's unreported 'other' bucket."""
+
+    def test_classified_as_authors_not_other(self):
+        from generate_changelog import classify
+
+        self.assertEqual(("authors", "authors.json"), classify("authors.json"))
+        self.assertEqual(("authors", "authors.json"), classify("./authors.json"))
+
+    def test_a_change_to_author_names_is_reported(self):
+        from generate_changelog import non_book_counts
+
+        sha_a, sha_b = "a" * 64, "b" * 64
+        _links, _versions, _toc, authors = non_book_counts(
+            {"authors.json": sha_a}, {"authors.json": sha_b}
+        )
+        self.assertTrue(authors)
+
+    def test_an_unchanged_authors_file_is_not_reported(self):
+        from generate_changelog import non_book_counts
+
+        sha = "a" * 64
+        _links, _versions, _toc, authors = non_book_counts(
+            {"authors.json": sha}, {"authors.json": sha}
+        )
+        self.assertFalse(authors)
+
+    def test_a_new_authors_file_is_reported(self):
+        from generate_changelog import non_book_counts
+
+        _links, _versions, _toc, authors = non_book_counts({}, {"authors.json": "a" * 64})
+        self.assertTrue(authors)

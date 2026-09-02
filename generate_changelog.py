@@ -91,7 +91,7 @@ def load_manifest(path):
 
 
 def classify(path):
-    """Return (bucket, label): bucket is book|version|schema|link|toc|other."""
+    """Return (bucket, label): bucket is book|version|schema|link|toc|authors|other."""
     p = path[2:] if path.startswith("./") else path
     if p.startswith("json/") and p.endswith("/merged.json"):
         return "book", p[len("json/"):-len("/merged.json")]
@@ -104,6 +104,8 @@ def classify(path):
         return "link", p[len("links/"):]
     if p == "table_of_contents.json":
         return "toc", "table_of_contents.json"
+    if p == "authors.json":
+        return "authors", "authors.json"
     return "other", p
 
 
@@ -211,14 +213,15 @@ def book_records(manifest):
 
 
 def non_book_counts(old, new):
-    """Counts for the 'Also' note: link tables, version files touched, TOC changed."""
+    """Counts for the 'Also' note: links, version files, TOC, author names."""
     new_keys, old_keys = set(new), set(old)
     changed = {k for k in (new_keys & old_keys) if old[k] != new[k]}
     touched = (new_keys - old_keys) | (old_keys - new_keys) | changed
     links = sum(1 for p in touched if classify(p)[0] == "link")
     versions = sum(1 for p in touched if classify(p)[0] == "version")
     toc = any(classify(p)[0] == "toc" for p in touched)
-    return links, versions, toc
+    authors = any(classify(p)[0] == "authors" for p in touched)
+    return links, versions, toc, authors
 
 
 def diff_books(old_recs, new_recs, old_titles, new_titles):
@@ -396,7 +399,7 @@ def main():
         f"| 📝 Content changed | {n['content_changed']} |",
         "",
     ]
-    links, versions, toc = non_book_counts(old, new)
+    links, versions, toc, authors = non_book_counts(old, new)
     note = []
     if links:
         note.append(f"{links} link table(s) regenerated")
@@ -404,6 +407,8 @@ def main():
         note.append(f"{versions} version file(s) added/updated/removed")
     if toc:
         note.append("table of contents updated")
+    if authors:
+        note.append("author names updated")
     if note:
         lines += ["_Also: " + ", ".join(note) + "._", ""]
 
