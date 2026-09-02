@@ -11,6 +11,7 @@ The cuts are applied at the source (Sefaria's `export_formats` tuple and a
 custom `export_all_merged` loop), so we save both disk IO and CPU compared
 to running the full upstream export.
 """
+import json
 import os
 import sys
 import traceback
@@ -411,6 +412,115 @@ def run_links_export_extended() -> None:
           f"sefaria={sefaria_project_sha[:12]}")
 
 
+AUTHORS_EXPORT_FILENAME = "authors.json"
+
+
+def _author_titles(doc) -> list:
+    """The `titles` array of one topic doc, normalized and ordered.
+
+    Sefaria stores every name form a person is known by — including the
+    honorific and acronym forms (``רבנו נסים מגירונה (ר"ן)``, ``ראב"ד``) that
+    the bare `authors[].he` on a book schema does not carry. Each entry keeps
+    its `lang` and `primary` flags so the consumer can pick a form per
+    language rather than guessing.
+
+    Primary forms come first, then the rest in a stable order, so two runs over
+    the same dump produce byte-identical output.
+    """
+    out = []
+    for t in (doc.get("titles") or []):
+        text = (t.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({
+            "text": text,
+            "lang": t.get("lang") or "",
+            "primary": bool(t.get("primary")),
+        })
+    # Dedupe on (text, lang) — the dump does carry repeats.
+    seen = set()
+    deduped = []
+    for t in out:
+        key = (t["text"], t["lang"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(t)
+    deduped.sort(key=lambda t: (not t["primary"], t["lang"], t["text"]))
+    return deduped
+
+
+def _primary(titles, lang) -> str:
+    """The primary title for `lang`, else the first title in that language."""
+    for t in titles:
+        if t["lang"] == lang and t["primary"]:
+            return t["text"]
+    for t in titles:
+        if t["lang"] == lang:
+            return t["text"]
+    return ""
+
+
+def run_authors_export() -> None:
+    """Write `exports/authors.json` — every author topic with all its titles.
+
+    The `topics` collection is already in the dump we restore, but nothing
+    exported it, so downstream only ever saw the single bare `he` name that
+    sits on each book's schema. This is the whole author-name vocabulary:
+    slug plus every title form, which is what lets a consumer show
+    ``מהר"ם מפאדובה`` instead of ``מאיר בן יצחק קצנלנבוגן``.
+
+    Keyed by slug because that is the identifier a book schema's
+    `authors[].slug` already points at.
+    """
+    from sefaria.system.database import db
+
+    export_base = os.environ.get("SEFARIA_EXPORT_PATH") or os.path.join(
+        os.environ.get("GITHUB_WORKSPACE", os.getcwd()), "exports"
+    )
+    os.makedirs(export_base, exist_ok=True)
+
+    records = []
+    cursor = db.topics.find(
+        {"subclass": "author"},
+        {"slug": 1, "titles": 1, "properties": 1, "_id": 0},
+    ).sort([["slug", 1]])
+    for doc in cursor:
+        slug = (doc.get("slug") or "").strip()
+        if not slug:
+            continue
+        titles = _author_titles(doc)
+        if not titles:
+            continue
+        records.append({
+            "slug": slug,
+            "primaryHe": _primary(titles, "he"),
+            "primaryEn": _primary(titles, "en"),
+            "titles": titles,
+        })
+
+    # Fail loudly: an empty result means the dump lacks author topics or the
+    # `subclass` marker moved. Shipping an empty authors.json would silently
+    # strip every honorific downstream.
+    if not records:
+        raise RuntimeError(
+            "no author topics found in db.topics (subclass='author') — "
+            "refusing to write an empty authors.json"
+        )
+
+    out_path = os.path.join(export_base, AUTHORS_EXPORT_FILENAME)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(records, fh, ensure_ascii=False, indent=1, sort_keys=False)
+        fh.write("\n")
+
+    with_he = sum(1 for r in records if r["primaryHe"])
+    total_titles = sum(len(r["titles"]) for r in records)
+    print(
+        f"\u2705 authors export: {len(records)} author topics "
+        f"({with_he} with a Hebrew primary, {total_titles} title forms) -> {out_path}"
+    )
+
+
 def flatten_hebrew_dirs(export_base: str) -> None:
     """Move the contents of every `.../Hebrew/` directory one level up.
 
@@ -476,6 +586,9 @@ def main() -> int:
         print(f"\n{'='*60}\n▶️  Running export_links (extended)...\n{'='*60}")
         run_links_export_extended()
         print("✅ export_links (extended) completed")
+
+        print(f"\n{'='*60}\n\u25b6\ufe0f  Running authors export...\n{'='*60}")
+        run_authors_export()
 
         for fn_name in ("export_schemas", "export_toc"):
             print(f"\n{'='*60}\n▶️  Running {fn_name}...\n{'='*60}")
