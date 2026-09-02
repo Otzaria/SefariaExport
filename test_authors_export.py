@@ -109,7 +109,7 @@ class AuthorsExportTest(unittest.TestCase):
 
     def test_only_author_topics_are_queried(self):
         _, topics = self._run([
-            {"slug": "a", "subclass": "author", "titles": [{"text": "A", "lang": "en"}]},
+            {"slug": "a", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
             {"slug": "prayer", "subclass": "concept", "titles": [{"text": "Prayer", "lang": "en"}]},
         ])
         query, projection = topics.queries[0]
@@ -120,9 +120,9 @@ class AuthorsExportTest(unittest.TestCase):
 
     def test_records_are_sorted_by_slug(self):
         out, topics = self._run([
-            {"slug": "zzz", "subclass": "author", "titles": [{"text": "Z", "lang": "en"}]},
-            {"slug": "aaa", "subclass": "author", "titles": [{"text": "A", "lang": "en"}]},
-            {"slug": "mmm", "subclass": "author", "titles": [{"text": "M", "lang": "en"}]},
+            {"slug": "zzz", "subclass": "author", "titles": [{"text": "ז", "lang": "he"}]},
+            {"slug": "aaa", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
+            {"slug": "mmm", "subclass": "author", "titles": [{"text": "מ", "lang": "he"}]},
         ])
         self.assertEqual(["aaa", "mmm", "zzz"], [r["slug"] for r in out])
         self.assertEqual([[["slug", 1]]], topics.cursor.sort_calls)
@@ -157,16 +157,16 @@ class AuthorsExportTest(unittest.TestCase):
 
     def test_author_with_no_usable_title_is_skipped(self):
         out, _ = self._run([
-            {"slug": "keeps", "subclass": "author", "titles": [{"text": "A", "lang": "en"}]},
-            {"slug": "empty", "subclass": "author", "titles": [{"text": "  ", "lang": "en"}]},
+            {"slug": "keeps", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
+            {"slug": "empty", "subclass": "author", "titles": [{"text": "  ", "lang": "he"}]},
             {"slug": "none", "subclass": "author"},
         ])
         self.assertEqual(["keeps"], [r["slug"] for r in out])
 
     def test_author_with_no_slug_is_skipped(self):
         out, _ = self._run([
-            {"slug": "", "subclass": "author", "titles": [{"text": "A", "lang": "en"}]},
-            {"slug": "ok", "subclass": "author", "titles": [{"text": "B", "lang": "en"}]},
+            {"slug": "", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
+            {"slug": "ok", "subclass": "author", "titles": [{"text": "ב", "lang": "he"}]},
         ])
         self.assertEqual(["ok"], [r["slug"] for r in out])
 
@@ -196,3 +196,34 @@ class AuthorsExportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthorsExportFailLoudTest(AuthorsExportTest):
+    """The export must refuse to ship a file that silently lost every name."""
+
+    def test_records_without_any_hebrew_title_raise(self):
+        self._install_fake_db([
+            # A plausible upstream language-code change: nothing is tagged `he`.
+            {"slug": "a", "subclass": "author",
+             "titles": [{"text": "A", "lang": "he-IL", "primary": True}]},
+            {"slug": "b", "subclass": "author",
+             "titles": [{"text": "B", "lang": "en", "primary": True}]},
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["SEFARIA_EXPORT_PATH"] = tmp
+            try:
+                with self.assertRaises(RuntimeError) as cm:
+                    run_authors_export()
+                self.assertIn("Hebrew", str(cm.exception))
+                self.assertFalse((Path(tmp) / AUTHORS_EXPORT_FILENAME).exists())
+            finally:
+                os.environ.pop("SEFARIA_EXPORT_PATH", None)
+
+    def test_one_hebrew_title_is_enough_to_pass(self):
+        out, _ = self._run([
+            {"slug": "a", "subclass": "author", "titles": [{"text": "A", "lang": "en"}]},
+            {"slug": "b", "subclass": "author", "titles": [{"text": "ב", "lang": "he"}]},
+        ])
+        self.assertEqual(["a", "b"], [r["slug"] for r in out])
+        self.assertEqual("", out[0]["primaryHe"])
+        self.assertEqual("ב", out[1]["primaryHe"])

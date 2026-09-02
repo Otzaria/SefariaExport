@@ -499,13 +499,23 @@ def run_authors_export() -> None:
             "titles": titles,
         })
 
-    # Fail loudly: an empty result means the dump lacks author topics or the
-    # `subclass` marker moved. Shipping an empty authors.json would silently
-    # strip every honorific downstream.
+    with_he = sum(1 for r in records if r["primaryHe"])
+
+    # Fail loudly, on both ways this can go wrong. No records at all means the
+    # dump lacks author topics or the `subclass` marker moved. No Hebrew name on
+    # any record is the subtler one: a change to Sefaria's language codes
+    # (`he` -> `he-IL`, say) would leave every primaryHe empty while the export
+    # still reported success — precisely the silent honorific-stripping this
+    # whole step exists to prevent.
     if not records:
         raise RuntimeError(
             "no author topics found in db.topics (subclass='author') — "
             "refusing to write an empty authors.json"
+        )
+    if not with_he:
+        raise RuntimeError(
+            f"{len(records)} author topics found but not one has a Hebrew title "
+            "(lang='he') — refusing to write an authors.json with no Hebrew names"
         )
 
     out_path = os.path.join(export_base, AUTHORS_EXPORT_FILENAME)
@@ -513,10 +523,9 @@ def run_authors_export() -> None:
         json.dump(records, fh, ensure_ascii=False, indent=1, sort_keys=False)
         fh.write("\n")
 
-    with_he = sum(1 for r in records if r["primaryHe"])
     total_titles = sum(len(r["titles"]) for r in records)
     print(
-        f"\u2705 authors export: {len(records)} author topics "
+        f"✅ authors export: {len(records)} author topics "
         f"({with_he} with a Hebrew primary, {total_titles} title forms) -> {out_path}"
     )
 
@@ -575,6 +584,13 @@ def main() -> int:
     ex.export_formats = (('json', ex.make_json),)
 
     try:
+        # First, and deliberately: seconds of work that prove the DB is
+        # reachable and that Sefaria's author model still looks the way we
+        # expect. Failing here costs nothing; failing after the merged /
+        # versions / links exports costs hours of runner time for no artifact.
+        print(f"\n{'='*60}\n▶️  Running authors export...\n{'='*60}")
+        run_authors_export()
+
         print("\n" + "="*60)
         print("▶️  Running merged export (Hebrew + JSON only)")
         print("="*60)
@@ -586,9 +602,6 @@ def main() -> int:
         print(f"\n{'='*60}\n▶️  Running export_links (extended)...\n{'='*60}")
         run_links_export_extended()
         print("✅ export_links (extended) completed")
-
-        print(f"\n{'='*60}\n\u25b6\ufe0f  Running authors export...\n{'='*60}")
-        run_authors_export()
 
         for fn_name in ("export_schemas", "export_toc"):
             print(f"\n{'='*60}\n▶️  Running {fn_name}...\n{'='*60}")
