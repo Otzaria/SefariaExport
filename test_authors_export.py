@@ -39,6 +39,9 @@ class FakeCursor:
 
 
 class FakeTopics:
+    """Honours the projection, like pymongo — a field dropped from the
+    projection must break the tests, not pass silently and then fail in CI."""
+
     def __init__(self, docs):
         self.docs = docs
         self.queries = []
@@ -47,6 +50,9 @@ class FakeTopics:
     def find(self, query, projection=None):
         self.queries.append((query, projection))
         matched = [d for d in self.docs if all(d.get(k) == v for k, v in query.items())]
+        if projection:
+            keep = {k for k, v in projection.items() if v and k != "_id"}
+            matched = [{k: v for k, v in d.items() if k in keep} for d in matched]
         self.cursor = FakeCursor(matched)
         return self.cursor
 
@@ -119,13 +125,14 @@ class AuthorsExportTest(unittest.TestCase):
     # --- determinism: the archive must be reproducible across runs ---
 
     def test_records_are_sorted_by_slug(self):
+        """Sorted in Python, so document order out of Mongo cannot leak in."""
         out, topics = self._run([
             {"slug": "zzz", "subclass": "author", "titles": [{"text": "ז", "lang": "he"}]},
             {"slug": "aaa", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
             {"slug": "mmm", "subclass": "author", "titles": [{"text": "מ", "lang": "he"}]},
         ])
         self.assertEqual(["aaa", "mmm", "zzz"], [r["slug"] for r in out])
-        self.assertEqual([[["slug", 1]]], topics.cursor.sort_calls)
+        self.assertEqual([], topics.cursor.sort_calls)
 
     def test_titles_order_is_stable_primary_first(self):
         titles = _author_titles({
@@ -171,11 +178,19 @@ class AuthorsExportTest(unittest.TestCase):
         self.assertEqual(["ok"], [r["slug"] for r in out])
 
     def test_primary_falls_back_to_first_title_in_language(self):
-        titles = [
-            {"text": "שני", "lang": "he", "primary": False},
-            {"text": "ראשון", "lang": "he", "primary": False},
-        ]
-        self.assertEqual("שני", _primary(titles, "he"))
+        """With no primary flag, the first title *in sorted order* wins.
+
+        `_primary` is only ever called on `_author_titles` output, so the input
+        is already sorted by (not primary, lang, text) — feeding it raw
+        document order would document a fallback the real path never takes.
+        """
+        titles = _author_titles({
+            "titles": [
+                {"text": "שני", "lang": "he", "primary": False},
+                {"text": "ראשון", "lang": "he", "primary": False},
+            ],
+        })
+        self.assertEqual("ראשון", _primary(titles, "he"))
         self.assertEqual("", _primary(titles, "en"))
 
     # --- fail loudly ---
@@ -227,3 +242,63 @@ class AuthorsExportFailLoudTest(AuthorsExportTest):
         self.assertEqual(["a", "b"], [r["slug"] for r in out])
         self.assertEqual("", out[0]["primaryHe"])
         self.assertEqual("ב", out[1]["primaryHe"])
+
+
+class AuthorsExportRobustnessTest(AuthorsExportTest):
+    """The dump holds documents that never went through Topic._normalize()."""
+
+    def test_malformed_titles_are_skipped_not_crashed(self):
+        for bad in ({"a": 1}, "not a list", 5, None):
+            with self.subTest(titles=bad):
+                self.assertEqual([], _author_titles({"titles": bad}))
+
+    def test_non_dict_title_entries_are_skipped(self):
+        titles = _author_titles({
+            "titles": ["a bare string", None, 7, {"text": "א", "lang": "he"}],
+        })
+        self.assertEqual([("א", "he")], [(t["text"], t["lang"]) for t in titles])
+
+    def test_non_string_text_and_lang_are_coerced(self):
+        titles = _author_titles({"titles": [{"text": 1948, "lang": 7}]})
+        self.assertEqual([("1948", "7")], [(t["text"], t["lang"]) for t in titles])
+
+    def test_a_malformed_author_does_not_sink_the_export(self):
+        out, _ = self._run([
+            {"slug": "broken", "subclass": "author", "titles": "not a list"},
+            {"slug": "fine", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
+        ])
+        self.assertEqual(["fine"], [r["slug"] for r in out])
+
+    def test_disambiguation_is_kept(self):
+        """Two people share a name; this is what tells them apart."""
+        titles = _author_titles({
+            "titles": [{"text": "יוסף קארו", "lang": "he", "disambiguation": "the Beit Yosef"}],
+        })
+        self.assertEqual("the Beit Yosef", titles[0]["disambiguation"])
+
+    def test_disambiguation_absent_means_key_absent(self):
+        titles = _author_titles({"titles": [{"text": "א", "lang": "he"}]})
+        self.assertNotIn("disambiguation", titles[0])
+
+    def test_output_is_byte_identical_across_runs(self):
+        """The release chain and changelog depend on a reproducible archive."""
+        docs = [
+            {"slug": "b", "subclass": "author", "titles": [
+                {"text": "ב", "lang": "he", "primary": True},
+                {"text": 'רב"ב', "lang": "he"},
+                {"text": "B", "lang": "en", "primary": True},
+            ]},
+            {"slug": "a", "subclass": "author", "titles": [
+                {"text": "א", "lang": "he", "primary": True},
+            ]},
+        ]
+        first = json.dumps(self._run(docs)[0], ensure_ascii=False, sort_keys=False)
+        second = json.dumps(self._run(list(reversed(docs)))[0], ensure_ascii=False, sort_keys=False)
+        self.assertEqual(first, second)
+
+    def test_projection_keeps_the_fields_the_writer_needs(self):
+        _, topics = self._run([
+            {"slug": "a", "subclass": "author", "titles": [{"text": "א", "lang": "he"}]},
+        ])
+        _query, projection = topics.queries[0]
+        self.assertEqual({"slug": 1, "titles": 1, "_id": 0}, projection)

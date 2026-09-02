@@ -427,16 +427,30 @@ def _author_titles(doc) -> list:
     Primary forms come first, then the rest in a stable order, so two runs over
     the same dump produce byte-identical output.
     """
+    raw = doc.get("titles")
+    # The dump holds documents that predate schema changes and never went
+    # through Topic._normalize(), so nothing about the shape is guaranteed.
+    # A malformed one must be skipped, not crash the whole export.
+    if not isinstance(raw, list):
+        return []
     out = []
-    for t in (doc.get("titles") or []):
-        text = (t.get("text") or "").strip()
+    for t in raw:
+        if not isinstance(t, dict):
+            continue
+        text = str(t.get("text") or "").strip()
         if not text:
             continue
-        out.append({
+        entry = {
             "text": text,
-            "lang": t.get("lang") or "",
+            "lang": str(t.get("lang") or ""),
             "primary": bool(t.get("primary")),
-        })
+        }
+        # Two people can share a name; Sefaria tells them apart with this.
+        # Without it the consumer sees two slugs with an identical primaryHe.
+        disambiguation = t.get("disambiguation")
+        if disambiguation:
+            entry["disambiguation"] = str(disambiguation)
+        out.append(entry)
     # Dedupe on (text, lang) — the dump does carry repeats.
     seen = set()
     deduped = []
@@ -483,8 +497,8 @@ def run_authors_export() -> None:
     records = []
     cursor = db.topics.find(
         {"subclass": "author"},
-        {"slug": 1, "titles": 1, "properties": 1, "_id": 0},
-    ).sort([["slug", 1]])
+        {"slug": 1, "titles": 1, "_id": 0},
+    )
     for doc in cursor:
         slug = (doc.get("slug") or "").strip()
         if not slug:
@@ -498,6 +512,11 @@ def run_authors_export() -> None:
             "primaryEn": _primary(titles, "en"),
             "titles": titles,
         })
+
+    # Sorted here rather than in Mongo: `topics` carries no index after the
+    # --noIndexRestore restore, and sorting in Python also breaks the tie
+    # between two documents that somehow share a slug.
+    records.sort(key=lambda r: (r["slug"], r["primaryHe"], r["primaryEn"]))
 
     with_he = sum(1 for r in records if r["primaryHe"])
 
