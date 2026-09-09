@@ -1,0 +1,91 @@
+name: Docker image build
+
+# Nothing else in this repo ever builds the image.  `release.yml` is
+# `workflow_dispatch` only, so the move to noble — new base OS, distro
+# python3.12, a virtualenv and a changed package set, all in one commit —
+# reached a green PR with zero build coverage.  This job turns "discovered at
+# 06:00 on the weekly" into "discovered on the pull request".
+#
+# Why a separate workflow rather than a job in `tests.yml`: `tests.yml` is the
+# only other PR-triggered workflow and its `test` job must run on *every* pull
+# request, so a trigger-level `paths:` filter cannot go there without gating the
+# test suite with it, and per-job path filtering needs a third-party action
+# (`dorny/paths-filter`) that would itself have to be pinned and trusted.  A
+# separate file with its own `paths:` filter buys both for free.
+#
+# The path list is the Dockerfile's build inputs: the Dockerfile, the
+# `.dockerignore` that decides what the build context contains, the compose file
+# that declares the same build, and `*.sh` / `*.py` — the COPY list
+# (`COPY *.sh *.py ./`, `COPY entrypoint.sh /app/entrypoint.sh`).  This repo has
+# no requirements file; Sefaria's is cloned inside the container by 05/07.  `*`
+# does not match `/` in a `paths:` glob, so these are repository-root files
+# only, which is exactly the COPY scope.
+#
+# Do NOT make this a required status check: a path-filtered workflow never
+# reports on pull requests that touch none of these files.
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose*.yml
+      - '*.sh'
+      - '*.py'
+      - .github/workflows/docker-build.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose*.yml
+      - '*.sh'
+      - '*.py'
+      - .github/workflows/docker-build.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout the commit to build
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Third-party actions are SHA-pinned, same rule and the same two commits
+      # as release.yml, enforced across every workflow by
+      # test_every_third_party_action_in_every_workflow_is_pinned_to_a_commit.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Build the exporter image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          # Identical to the release build: same context, same Dockerfile, and
+          # no build-args and no target there either.  A build that passes here
+          # is the build the weekly runs.
+          context: .
+          file: Dockerfile
+          # Coverage, not delivery.  Nothing is pushed and nothing is loaded
+          # into the local daemon, so BuildKit executes every layer and discards
+          # the result; a failing RUN still fails this job.
+          push: false
+          load: false
+          # Read the shared `type=gha` cache release.yml writes — same default
+          # scope, same key — so a pull request usually starts from the weekly's
+          # warm layers.  Deliberately no `cache-to`: a write from a pull-request
+          # branch lands in that branch's own isolated cache scope, and ~1 GB per
+          # open branch would evict the one entry that actually saves the weekly
+          # its time.
+          cache-from: type=gha
