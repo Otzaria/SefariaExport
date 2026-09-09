@@ -468,6 +468,28 @@ def _unusable_version_title(title) -> bool:
     return not title or isinstance(title, (dict, list))
 
 
+def _unusable_title_diagnostic(title, max_chars=500) -> dict:
+    """A bounded, JSON-safe record for every excluded BSON title value.
+
+    The report must retain one entry per offending document, including after
+    the warning log reaches its cap.  Embedded BSON documents can be very
+    large, so retain their type and a deterministic diagnostic representation
+    without allowing one corrupt value to make the report unbounded.
+    """
+    try:
+        rendered = repr(title)
+    except Exception as exc:  # pragma: no cover - defensive for exotic BSON
+        rendered = f"<repr failed: {type(exc).__name__}: {exc}>"
+    truncated = len(rendered) > max_chars
+    if truncated:
+        rendered = rendered[:max_chars] + "…"
+    return {
+        "type": type(title).__name__,
+        "repr": rendered,
+        "truncated": truncated,
+    }
+
+
 def run_versions_export_he_only(ex) -> dict:
     """Per-version export for titles with 2+ Hebrew versions.
 
@@ -484,14 +506,14 @@ def run_versions_export_he_only(ex) -> dict:
 
     reset_warning_budget()
     counts = {}
-    unusable_titles = 0
+    unusable_titles = []
     for doc in db.texts.find({"language": "he"}, {"title": 1, "license": 1}):
         title = doc.get("title")
         if _unusable_version_title(title):
             # Kept out of this pass's population — but named, because a value
             # that is dropped without a word makes a corrupt dump look exactly
             # like a clean one.
-            unusable_titles += 1
+            unusable_titles.append(_unusable_title_diagnostic(title))
             warn_capped("unusable title",
                         f"⚠️  unusable title in he texts: {title!r} "
                         f"({type(title).__name__}) — excluded from this pass")
@@ -499,7 +521,7 @@ def run_versions_export_he_only(ex) -> dict:
         if title and not ex.text_is_copyright(doc):
             counts[title] = counts.get(title, 0) + 1
     if unusable_titles:
-        print(f"⚠️  {unusable_titles} he text(s) have a non-scalar title "
+        print(f"⚠️  {len(unusable_titles)} he text(s) have a non-scalar title "
               f"(embedded document / array) or a falsy non-string title "
               f"(0, False, b'') and are excluded from this pass",
               flush=True)
@@ -630,6 +652,14 @@ def run_versions_export_he_only(ex) -> dict:
         "expected_docs": total,
         "docs": done,
         "copyright_excluded": copyright_excluded,
+        # Kept outside ``counts`` because these documents were deliberately
+        # excluded before the version-pass population identity was formed.
+        # Unlike the capped warning stream, this list has one JSON-safe entry
+        # per occurrence and is therefore complete in export_report.json.
+        "unusable_titles_excluded": {
+            "count": len(unusable_titles),
+            "items": unusable_titles,
+        },
         "counts": tally,
         "names": names,
     }

@@ -685,6 +685,62 @@ class VersionsAccountingTest(SefariaStubMixin, unittest.TestCase):
         self.assertEqual(2, stats["counts"]["written"])
         self.assertNotIn("but expected", out)
 
+        excluded = stats["unusable_titles_excluded"]
+        self.assertEqual(3, excluded["count"])
+        self.assertEqual(
+            [
+                {"type": "int", "repr": "0", "truncated": False},
+                {"type": "bool", "repr": "False", "truncated": False},
+                {"type": "bytes", "repr": "b''", "truncated": False},
+            ],
+            excluded["items"],
+        )
+
+    def test_warning_cap_does_not_drop_unusable_titles_from_the_report(self):
+        docs = self._pair("Genesis")
+        docs.extend(
+            {"title": 0.0, "language": "he", "versionTitle": f"bad-{i}",
+             "chapter": "x"}
+            for i in range(WARNINGS_IN_LOG + 1)
+        )
+        self.install(docs=docs)
+        stats, out = self.run_captured(run_versions_export_he_only, FakeExport())
+
+        excluded = stats["unusable_titles_excluded"]
+        self.assertEqual(WARNINGS_IN_LOG + 1, excluded["count"])
+        self.assertEqual(WARNINGS_IN_LOG + 1, len(excluded["items"]))
+        self.assertTrue(all(item == {
+            "type": "float", "repr": "0.0", "truncated": False,
+        } for item in excluded["items"]))
+        self.assertEqual(WARNINGS_IN_LOG, out.count(
+            "unusable title in he texts: 0.0 (float)"))
+        self.assertIn("further unusable title warnings are not repeated", out)
+
+        report = build_export_report(versions=stats)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_export_report(tmp, report)
+            persisted = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertEqual(
+            WARNINGS_IN_LOG + 1,
+            len(persisted["versions"]["unusable_titles_excluded"]["items"]),
+        )
+
+    def test_embedded_title_diagnostics_are_bounded_but_every_occurrence_remains(self):
+        docs = self._pair("Genesis") + [
+            {"title": {"payload": "x" * 1000}, "language": "he",
+             "versionTitle": "A", "chapter": "x"},
+            {"title": [], "language": "he", "versionTitle": "B", "chapter": "x"},
+        ]
+        self.install(docs=docs)
+        stats, _ = self.run_captured(run_versions_export_he_only, FakeExport())
+        items = stats["unusable_titles_excluded"]["items"]
+        self.assertEqual(2, len(items))
+        self.assertTrue(items[0]["truncated"])
+        self.assertLessEqual(len(items[0]["repr"]), 501)
+        self.assertEqual(
+            {"type": "list", "repr": "[]", "truncated": False}, items[1])
+        json.dumps(stats)
+
     def test_a_truthy_non_string_title_still_reaches_bad_ref(self):
         """The guard must not quietly swallow what the loop already accounts."""
         self.install(docs=self._pair(b"Bytes"))
