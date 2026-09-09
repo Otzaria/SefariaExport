@@ -1,0 +1,11 @@
+# Git for Windows ships core.autocrlf=true in its system config, so without
+# attributes every shell script here checked out CRLF and bash died on
+# `set -euo pipefail\r` (test_legacy_release_mutators_fail_closed went red on
+# a clean tree). All 67 tracked files are already LF in the index, so these
+# lines change no blob and cannot affect the Linux runner; an existing Windows
+# worktree only picks them up on the next checkout of the file.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf

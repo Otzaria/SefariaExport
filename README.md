@@ -27,8 +27,11 @@ Prerequisites (local)
 ---------------------
 You can run the pipeline on Linux or macOS. The GitHub Actions workflow shows a fully automated reference run. For a local run, install or ensure access to:
 
-- Bash and coreutils
-- Python 3.9 (to mirror CI) with `pip`
+- Bash and coreutils — either GNU or BSD/macOS: steps 17 and 18 detect which
+  `stat`, `du` and `numfmt` are present and report sizes the same way with
+  either. One gap remains on macOS: step 18 only splits an archive larger than
+  1.9 GB with a `split` that supports `-d`, which older releases lack.
+- Python 3.12 (to mirror CI) with `pip`
 - Git, curl, unzip, jq
 - MongoDB Database Tools (for `mongorestore`)
 - A running MongoDB instance on `localhost:27017`
@@ -126,7 +129,7 @@ Environment variables
 ---------------------
 Some scripts accept environment variables to tweak behavior. Common ones include:
 
-- `PYTHON_VERSION` – Pin a Python version (the CI uses 3.9)
+- `PYTHON_VERSION` – Pin a Python version (the CI uses 3.12)
 - `MONGODB_URI` – Override the default MongoDB connection string (e.g., `mongodb://localhost:27017`)
 - `GITHUB_TOKEN` – Personal Access Token with `repo` scope, required for release steps when running locally
 - `RELEASE_TAG` / `RELEASE_NAME` – Override the computed tag/name for releases
