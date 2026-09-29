@@ -152,42 +152,128 @@ def load_author_forms(path):
     return forms
 
 
-class ExportIdentities:
-    """Current books as SeforimLibrary reads them: schemas/<title>.json + authors.json."""
+class NotImported(Exception):
+    """SeforimLibrary's parseBookFile would return null: the book is never imported."""
 
-    def __init__(self, exports_dir):
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def string_or_none(value):
+    """Kotlin stringOrNull: a JSON primitive's content; None for null, objects and arrays."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    return None
+
+
+def first_not_none(*values):
+    """Kotlin's `?:` chain: an empty string is a value, only null falls through."""
+    return next((v for v in values if v is not None), None)
+
+
+def json_array(obj, key):
+    """Kotlin obj[key]?.jsonArray: None when absent; a non-array value throws."""
+    if key not in obj:
+        return None
+    if not isinstance(obj[key], list):
+        raise NotImported(f"{key} is not an array")
+    return obj[key]
+
+
+def primitive_contents(items):
+    """Kotlin mapNotNull { it.jsonPrimitive.contentOrNull }."""
+    if any(isinstance(item, (dict, list)) for item in items):
+        raise NotImported("non-primitive array element")
+    return [c for item in items if (c := string_or_none(item)) is not None]
+
+
+class ExportIdentities:
+    """Current books as SeforimLibrary's parseBookFile reads them; None = not imported."""
+
+    def __init__(self, exports_dir, labels, author_forms):
         self.exports_dir = exports_dir
-        self.author_forms = load_author_forms(os.path.join(exports_dir, "authors.json"))
+        self.schema_dir = os.path.join(exports_dir, "schemas")
+        self.labels = labels
+        self.author_forms = author_forms
+        self.lookup = None
         self.cache = {}
 
     def __call__(self, en):
         if en not in self.cache:
-            self.cache[en] = self._read(en)
+            try:
+                self.cache[en] = self._read(en)
+            except NotImported:
+                self.cache[en] = None
         return self.cache[en]
 
+    def not_imported(self):
+        return sorted(en for en, identity in self.cache.items() if identity is None)
+
+    def _schema_lookup(self):
+        """buildSchemaLookup; first file wins, in sorted order (Kotlin's is directory order)."""
+        if self.lookup is None:
+            self.lookup = {}
+            for name in sorted(os.listdir(self.schema_dir)):
+                if not name.endswith(".json"):
+                    continue
+                doc = read_json(os.path.join(self.schema_dir, name))
+                node = doc.get("schema") if isinstance(doc, dict) else None
+                if not isinstance(node, dict):
+                    continue
+                for title in (node.get("title"), node.get("heTitle")):
+                    if key := normalize_title_key(string_or_none(title)):
+                        self.lookup.setdefault(key, os.path.join(self.schema_dir, name))
+        return self.lookup
+
+    def _resolve_schema(self, title, he_title, folder):
+        """resolveSchemaPath: normalized lookup first, then <candidate>.json, per candidate."""
+        for candidate in (c for c in (title, he_title, folder.replace("_", " "), folder) if c is not None):
+            key = normalize_title_key(candidate)
+            if key and key in self._schema_lookup():
+                return self.lookup[key]
+            path = os.path.join(self.schema_dir, candidate.replace(" ", "_") + ".json")
+            if os.path.exists(path):
+                return path
+        return None
+
     def _read(self, en):
-        path = os.path.join(self.exports_dir, "schemas", en.replace(" ", "_") + ".json")
-        with open(path, encoding="utf-8") as fh:
-            doc = json.load(fh)
+        label = self.labels.get(en)
+        merged = read_json(os.path.join(self.exports_dir, "json", f"{label}/merged.json")) if label else None
+        if not isinstance(merged, dict):
+            raise NotImported("merged.json unreadable")
+        file_title, file_he = string_or_none(merged.get("title")), string_or_none(merged.get("heTitle"))
+        schema_path = self._resolve_schema(file_title, file_he, en)
+        doc = read_json(schema_path) if schema_path else None
         node = doc.get("schema") if isinstance(doc, dict) else None
         if not isinstance(node, dict):
-            raise ValueError(f"{path} has no schema object")
-        en_title, he_title = node.get("title"), node.get("heTitle")
-        if not isinstance(en_title, str) or not isinstance(he_title, str):
-            raise ValueError(f"{path} schema lacks title/heTitle")
-        he_categories = doc.get("heCategories")
-        if not isinstance(he_categories, list):
-            he_categories = node.get("heCategories")
-        if not isinstance(he_categories, list):
-            raise ValueError(f"{path} has no heCategories")
+            raise NotImported("no schema")
+        en_title = first_not_none(string_or_none(node.get("title")), file_title, en)
+        he_title = first_not_none(string_or_none(node.get("heTitle")), file_he, en_title)
+        if "text" not in merged:
+            raise NotImported("no text")
+        he_categories = json_array(doc, "heCategories")
+        if he_categories is None:
+            he_categories = json_array(node, "heCategories")
+        if he_categories is None:
+            he_categories = json_array(merged, "categories")
         authors = []
-        for entry in doc.get("authors") or []:
-            if isinstance(entry, dict) and isinstance(entry.get("he"), str):
-                authors.append(entry["he"])
-                slug = entry.get("slug")
-                if isinstance(slug, str):
-                    authors += self.author_forms.get(slug.strip(), [])
-        return Identity((en_title, he_title), [c for c in he_categories if isinstance(c, str)],
+        for entry in json_array(doc, "authors") or []:
+            if not isinstance(entry, dict):
+                raise NotImported("author entry is not an object")
+            if (he := string_or_none(entry.get("he"))) is not None:
+                authors.append(he)
+                slug = string_or_none(entry.get("slug"))
+                authors += self.author_forms.get(slug.strip(), []) if slug is not None else []
+        return Identity((en_title, he_title), primitive_contents(he_categories or []),
                         he_title, tuple(authors))
 
 
@@ -405,22 +491,31 @@ def diff_books(old_recs, new_recs, old_titles, new_titles):
     }
 
 
+def excluded(bl, current, en):
+    """SeforimLibrary skips the book: not importable, or blacklisted."""
+    identity = current(en)
+    return identity is None or bl.blocks(identity)
+
+
 def previously_blocked(bl, current, prior):
     """Books importable now that the current blacklists block under their previous title
-    or path. prior: {en: (old_en, old_he, new_he, same_category)}. Moved books have no
-    known previous Hebrew path, so with path entries present they are listed too."""
+    or path. prior: {en: (old_en, old_he, new_he, same_category)}. A path entry whose
+    leaf is the old title, on a book whose old categories are unknown, lists it too."""
+    # normalizedBookPath ends with the sanitized heTitle, so only that leaf can match.
+    leaves = {path.rsplit("/", 1)[-1] for path in bl.paths}
     out = []
     for en in sorted(prior):
         old_en, old_he, new_he, same_category = prior[en]
         matched = bl.title_match(old_he, old_en)
-        if not (matched or bl.paths) or bl.blocks(current(en)):
+        leaf_hit = sanitize_folder(old_he if old_he is not None else old_en) in leaves
+        if not (matched or leaf_hit) or excluded(bl, current, en):
             continue
         entry = {"en": en, "he": new_he, "old_en": old_en, "old_he": old_he}
         if matched:
             out.append({**entry, "reason": "title", "old_name": matched})
             continue
         he_categories = current(en).he_categories
-        if not (same_category and old_he and he_categories is not None):
+        if not (same_category and old_he is not None and he_categories is not None):
             out.append({**entry, "reason": "path-unknown", "old_name": None})
         elif (old_path := book_path(he_categories, old_he)) in bl.paths:
             out.append({**entry, "reason": "path", "old_name": old_path})
@@ -444,7 +539,7 @@ def apply_blacklist(diff, bl, current, prior):
         return en not in gone
 
     def keep_current(en):
-        return keep(en, bl.blocks(current(en)))
+        return keep(en, excluded(bl, current, en))
 
     diff["added"] = [b for b in diff["added"] if keep_current(b["en"])]
     # A removed book has no schema in this export: its titles are all there is to match.
@@ -504,18 +599,26 @@ def main():
     new_titles = load_title_map(args.titles)
     old_titles = load_title_map(args.prev_titles)
 
+    old_recs, new_recs = book_records(old), book_records(new)
     bl = Blacklists(args.blacklist, args.authors_blacklist)
-    if bl and args.exports_dir:
-        current = ExportIdentities(args.exports_dir)
-    elif bl.paths or bl.authors:
-        print("❌ Path and author blacklist entries need --exports-dir (schemas + authors.json)",
-              file=sys.stderr)
-        return 1
+    identities = None
+    if bl and args.exports_dir and os.path.isdir(os.path.join(args.exports_dir, "schemas")):
+        try:
+            author_forms = load_author_forms(os.path.join(args.exports_dir, "authors.json"))
+        except (OSError, ValueError) as exc:
+            print(f"::warning::authors.json is unreadable ({exc}) — author blacklist NOT applied")
+            author_forms, bl.authors = {}, set()
+        identities = ExportIdentities(args.exports_dir,
+                                      {en: r["label"] for en, r in new_recs.items()}, author_forms)
+        current = identities
     else:
+        if bl.paths or bl.authors:
+            print("::warning::No export schemas to read — path and author blacklists NOT applied")
+            bl.paths, bl.authors = set(), set()
+
         def current(en):
             return Identity((en, new_titles.get(en)), None, None, ())
 
-    old_recs, new_recs = book_records(old), book_records(new)
     diff = diff_books(old_recs, new_recs, old_titles, new_titles)
     pairs = {en: en for en in set(old_recs) & set(new_recs)}
     pairs.update({b["new_en"]: b["old_en"] for b in diff["en_renamed"]})
@@ -533,8 +636,11 @@ def main():
     versions_blacklist = load_versions_blacklist(args.versions_blacklist)
     new_versions = diff_versions(
         old, new, new_titles, args.exports_dir,
-        lambda en: bool(bl) and bl.blocks(current(en)), versions_blacklist,
+        lambda en: bool(bl) and excluded(bl, current, en), versions_blacklist,
     ) if old else []
+    if identities and (skipped := identities.not_imported()):
+        print(f"::warning::{len(skipped)} book(s) SeforimLibrary would not import (no usable "
+              f"merged.json/schema) — dropped from the forum copy: {', '.join(skipped[:20])}")
     if new_versions:
         inexact = sum(1 for v in new_versions if not v["exact"])
         print(f"🆕 New book versions: {len(new_versions)}"
@@ -576,6 +682,8 @@ def main():
         f"| ✏️ Renamed | {n['he_renamed'] + n['en_renamed']} |",
         f"| 📂 Moved | {n['moved']} |",
         f"| 📝 Content changed | {n['content_changed']} |",
+        *([f"| 🔓 No longer blacklisted | {n['previously_blocked']} |"]
+          if "previously_blocked" in n else []),
         "",
     ]
     links, versions, toc, authors = non_book_counts(old, new)
@@ -624,7 +732,9 @@ def main():
     _write(args.out_md, "\n".join(lines))
     print(f"✅ Changelog written: {args.out_md} (added {n['added']}, removed {n['removed']}, "
           f"renamed {n['he_renamed'] + n['en_renamed']}, moved {n['moved']}, "
-          f"content {n['content_changed']}, new versions {len(new_versions)})")
+          f"content {n['content_changed']}, new versions {len(new_versions)}"
+          + (f", no longer blacklisted {n['previously_blocked']}" if "previously_blocked" in n else "")
+          + ")")
     return 0
 
 

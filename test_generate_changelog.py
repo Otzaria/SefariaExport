@@ -30,10 +30,16 @@ class Fixture:
         self.old_titles, self.new_titles = {}, {}
         self.lists = {}
 
-    def book(self, side, category, en, he, digest):
+    def book(self, side, category, en, he, digest, merged=None):
         manifest, titles = (self.old, self.old_titles) if side == "old" else (self.new, self.new_titles)
         manifest[f"./json/{category}/{en}/merged.json"] = sha(digest)
         titles[en] = he
+        if side == "new":
+            path = self.exports / "json" / category / en / "merged.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            doc = {"title": en, "heTitle": he, "categories": category.split("/"), "text": []}
+            path.write_text(json.dumps(merged if merged is not None else doc, ensure_ascii=False),
+                            encoding="utf-8")
 
     def version(self, category, en, filename, title):
         rel = f"json/{category}/{en}/{filename}.json"
@@ -42,10 +48,14 @@ class Fixture:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"versionTitle": title}), encoding="utf-8")
 
-    def schema(self, en, he, he_categories, authors=()):
-        doc = {"title": en, "heTitle": he, "heCategories": list(he_categories),
-               "authors": [dict(a) for a in authors], "schema": {"title": en, "heTitle": he}}
-        path = self.exports / "schemas" / (en.replace(" ", "_") + ".json")
+    def schema(self, en, he, he_categories, authors=(), file_name=None):
+        doc = {"title": en, "heTitle": he, "authors": [dict(a) for a in authors],
+               "schema": {"title": en, "heTitle": he}}
+        if he_categories is not None:
+            doc["heCategories"] = list(he_categories)
+        if he is None:
+            del doc["heTitle"], doc["schema"]["heTitle"]
+        path = self.exports / "schemas" / ((file_name or en.replace(" ", "_")) + ".json")
         path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
 
     def authors_json(self, records):
@@ -81,7 +91,7 @@ class Fixture:
         with mock.patch("sys.argv", argv), contextlib.redirect_stdout(stdout), \
                 contextlib.redirect_stderr(stderr):
             code = gc.main()
-        self.stderr = stderr.getvalue()
+        self.stdout, self.stderr = stdout.getvalue(), stderr.getvalue()
         self.changelog = (self.root / "CHANGELOG.md").read_text(encoding="utf-8") if code == 0 else ""
         return code, (json.loads(out.read_text(encoding="utf-8")) if code == 0 else None)
 
@@ -181,16 +191,27 @@ class DisplayFilterTest(unittest.TestCase):
         [entry] = diff["books"]["previously_blocked"]
         self.assertEqual(("path", "מוסר/קב הישר"), (entry["reason"], entry["old_name"]))
 
-    def test_a_move_with_path_entries_present_is_announced_as_unknown(self):
+    def test_a_move_with_an_unrelated_path_entry_stays_a_move(self):
         self.f.book("old", "Musar", "Kav HaYashar", "קב הישר", 2)
         self.f.book("new", "Halakhah", "Kav HaYashar", "קב הישר", 2)
         self.f.schema("Kav HaYashar", "קב הישר", ["הלכה"])
         self.f.blacklist("books.txt", "מוסר/ספר אחר")
         code, diff = self.f.run()
         self.assertEqual(0, code)
+        self.assertEqual(["Kav HaYashar"], self.ens(diff, "moved"))
+        self.assertEqual([], diff["books"]["previously_blocked"])
+
+    def test_a_move_whose_old_title_is_a_path_leaf_is_announced_as_unknown(self):
+        self.f.book("old", "Musar", "Kav HaYashar", "קב הישר", 2)
+        self.f.book("new", "Halakhah", "Kav HaYashar", "קב הישר", 2)
+        self.f.schema("Kav HaYashar", "קב הישר", ["הלכה"])
+        self.f.blacklist("books.txt", "מוסר/קב הישר")
+        code, diff = self.f.run()
+        self.assertEqual(0, code)
         self.assertEqual([], diff["books"]["moved"])
         [entry] = diff["books"]["previously_blocked"]
         self.assertEqual(("path-unknown", None), (entry["reason"], entry["old_name"]))
+        self.assertIn("| 🔓 No longer blacklisted | 1 |", self.f.changelog)
 
     def test_removed_books_are_matched_by_title_only(self):
         self.f.book("old", "Musar", "Gone", "ספר שהוסר", 9)
@@ -210,11 +231,54 @@ class DisplayFilterTest(unittest.TestCase):
                          set(diff["books"]))
         self.assertEqual(["Kav HaYashar"], self.ens(diff, "he_renamed"))
 
-    def test_author_or_path_entries_without_the_export_fail_loudly(self):
+    def test_author_or_path_entries_without_the_export_warn_and_are_skipped(self):
+        self.f.book("new", "Musar", "Book A", "ספר א", 4)
         self.f.blacklist("authors.txt", "פלוני אלמוני")
-        code, _ = self.f.run(exports=False)
-        self.assertEqual(1, code)
-        self.assertIn("--exports-dir", self.f.stderr)
+        self.f.blacklist("books.txt", "מוסר/ספר א")
+        code, diff = self.f.run(exports=False)
+        self.assertEqual(0, code)
+        self.assertIn("::warning::", self.f.stdout)
+        self.assertEqual(["Book A"], self.ens(diff, "added"))
+
+    def test_a_book_without_a_usable_schema_is_not_imported_and_dropped(self):
+        self.f.book("new", "Musar", "No Schema", "בלי סכמה", 10)
+        self.f.book("new", "Musar", "No Text", "בלי טקסט", 11, merged={"title": "No Text"})
+        self.f.schema("No Text", "בלי טקסט", ["מוסר"])
+        self.f.blacklist("books.txt", "ספר אחר")
+        code, diff = self.f.run()
+        self.assertEqual(0, code)
+        self.assertEqual([], diff["books"]["added"])
+        self.assertIn("::warning::2 book(s)", self.f.stdout)
+
+    def test_malformed_authors_json_warns_and_skips_author_filtering(self):
+        self.f.book("new", "Musar", "Book A", "ספר א", 4)
+        self.f.schema("Book A", "ספר א", ["מוסר"], [{"he": "פלוני אלמוני", "slug": "a"}])
+        (self.f.exports / "authors.json").write_text("{not json", encoding="utf-8")
+        self.f.blacklist("authors.txt", "פלוני אלמוני")
+        code, diff = self.f.run()
+        self.assertEqual(0, code)
+        self.assertIn("::warning::authors.json", self.f.stdout)
+        self.assertEqual(["Book A"], self.ens(diff, "added"))
+
+    def test_schema_is_resolved_by_normalized_title_before_file_name(self):
+        self.f.book("new", "Musar", "Sefer Chasidim", "ספר חסידים", 12)
+        self.f.schema("Sefer Chasidim", "ספר חסידים", ["מוסר"], file_name="Other_File")
+        self.f.blacklist("books.txt", "ספר אחר")
+        code, diff = self.f.run()
+        self.assertEqual(0, code)
+        self.assertEqual(["Sefer Chasidim"], self.ens(diff, "added"))
+        self.assertNotIn("would not import", self.f.stdout)
+
+    def test_missing_he_title_and_categories_fall_back_like_parse_book_file(self):
+        merged = {"title": "Tomer Devorah", "heTitle": "תומר דבורה", "categories": ["Musar"], "text": []}
+        self.f.book("new", "Musar", "Tomer Devorah", "תומר דבורה", 13, merged=merged)
+        self.f.schema("Tomer Devorah", None, None)
+        self.f.blacklist("books.txt", "Musar/תומר דבורה")
+        code, diff = self.f.run()
+        self.assertEqual(0, code)
+        self.assertEqual([], diff["books"]["added"])
+        self.assertNotIn("would not import", self.f.stdout)
+        self.assertIn("dropped 1 book entry", self.f.stdout)
 
     def test_title_blacklist_alone_still_works_without_the_export(self):
         self.f.book("new", "Musar", "Kav HaYashar", "קב הישר", 2)
