@@ -116,8 +116,6 @@ def build_new_books_post(diff, date):
         # Pasteable `book | versionTitle` lines for triage into black_versions.txt.
         block = "\n".join(versions)
         parts.append(f"\n## גרסאות (מהדורות) חדשות:\n```\n{block}\n```\n")
-    if not has_content:
-        parts.append("\nאין ספרים חדשים בעדכון זה.\n")
     return "".join(parts), has_content
 
 
@@ -235,7 +233,7 @@ def main():
     posts = []
     if args.only in ("both", "changes"):
         posts.append(("שינויים בספרים", args.topic, changes_text + footer))
-    if args.only in ("both", "new-books"):
+    if args.only in ("both", "new-books") and has_new_books:
         posts.append(("ספרים חדשים", args.new_books_topic, new_books_text + footer))
 
     # A re-publish asks for one specific thread; writing "nothing new" into it

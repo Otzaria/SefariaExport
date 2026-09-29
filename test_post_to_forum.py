@@ -231,6 +231,19 @@ class PostSelectionTest(unittest.TestCase):
         self.assertIn("topic 1617", out)
         self.assertIn("topic 1994", out)
 
+    def test_new_books_thread_is_never_written_without_new_books(self):
+        diff = self._diff(content_changed=[{"en": "Genesis", "he": "בראשית"}])
+        code, out = self._run(diff, [])
+        self.assertEqual(0, code)
+        self.assertIn("topic 1617", out)
+        self.assertNotIn("topic 1994", out)
+        self.assertNotIn("אין ספרים חדשים", out)
+
+    def test_release_posts_only_the_new_books_thread(self):
+        workflow = (Path(__file__).parent / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        command = next(line for line in workflow.splitlines() if "python3 post_to_forum.py" in line)
+        self.assertIn("--only new-books", command)
+
 
 class HebrewDateTest(unittest.TestCase):
     def test_an_explicit_day_is_honoured(self):
