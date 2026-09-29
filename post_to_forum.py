@@ -77,6 +77,19 @@ def version_lines(versions):
     return out
 
 
+def unblocked_lines(books):
+    """Books blacklisted only under their previous title/path, now importable."""
+    out = []
+    for b in books:
+        if b.get("reason") == "title":
+            out.append(f"{he_of(b)} — נחסם בעבר בשם «{b['old_name']}»")
+        elif b.get("reason") == "path":
+            out.append(f"{he_of(b)} — נחסם בעבר בנתיב «{b['old_name']}»")
+        else:
+            out.append(f"{he_of(b)} — נתיבו הקודם אינו ידוע, ייתכן שנחסם בעבר")
+    return sorted(out)
+
+
 def build_changes_post(diff, date):
     """'שינויים בספרים' post: renames, moves, content updates, removals."""
     books = diff.get("books", {})
@@ -102,16 +115,19 @@ def build_changes_post(diff, date):
 
 
 def build_new_books_post(diff, date):
-    """'ספרים חדשים' post: newly added books and new editions/versions."""
+    """'ספרים חדשים' post: newly added books, books no longer blacklisted, new versions."""
     books = diff.get("books", {})
     added = sorted({he_of(b) for b in books.get("added", [])})
+    unblocked = unblocked_lines(books.get("previously_blocked", []))
     versions = version_lines(diff.get("versions", {}).get("added", []))
 
-    has_content = bool(added or versions)
+    has_content = bool(added or unblocked or versions)
 
     parts = [f"# עדכון ספריית ספריא (Sefaria) — ספרים חדשים\n", f"**עדכון {date}**\n"]
     if added:
         parts.append(f"\n## ספרים חדשים:\n{bullets(added)}\n")
+    if unblocked:
+        parts.append(f"\n## ספרים שנחסמו בעבר בשם או בנתיב קודם ואינם חסומים עוד:\n{bullets(unblocked)}\n")
     if versions:
         # Pasteable `book | versionTitle` lines for triage into black_versions.txt.
         block = "\n".join(versions)

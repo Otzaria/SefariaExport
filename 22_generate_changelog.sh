@@ -65,7 +65,7 @@ else
 fi
 
 # Fetch an optional blacklist from the SeforimLibrary repo; a fetch failure is non-fatal
-# ($2 removed, $4 printed). Both blacklists live there — the fork's main branch is `otzaria`.
+# ($2 removed, $4 printed). All blacklists live there — the fork's main branch is `otzaria`.
 fetch_optional_list() {  # $1=url $2=dest $3=success-label $4=absence-note
   rm -f "$2"
   if curl -fsSL --retry 3 --max-time 60 "$1" -o "$2"; then
@@ -81,6 +81,12 @@ BLACKLIST="$WORKDIR/books_blacklist.txt"
 BLACKLIST_URL="${BOOKS_BLACKLIST_URL:-https://raw.githubusercontent.com/Otzaria/SeforimLibrary/otzaria/generator/sefariasqlite/src/jvmMain/resources/books_blacklist.txt}"
 fetch_optional_list "$BLACKLIST_URL" "$BLACKLIST" "Blacklist" \
   "⚠️  Could not fetch blacklist from $BLACKLIST_URL — publishing WITHOUT blacklist filtering."
+
+# SeforimLibrary also skips every book by an author on the authors blacklist.
+AUTHORS_BLACKLIST="$WORKDIR/authors_blacklist.txt"
+AUTHORS_BLACKLIST_URL="${AUTHORS_BLACKLIST_URL:-https://raw.githubusercontent.com/Otzaria/SeforimLibrary/otzaria/generator/sefariasqlite/src/jvmMain/resources/authors_blacklist.txt}"
+fetch_optional_list "$AUTHORS_BLACKLIST_URL" "$AUTHORS_BLACKLIST" "Authors blacklist" \
+  "⚠️  Could not fetch authors blacklist from $AUTHORS_BLACKLIST_URL — publishing WITHOUT author filtering."
 
 # The versions blacklist keeps already-excluded editions out of the "new book versions" report.
 VERSIONS_BLACKLIST="$WORKDIR/black_versions.txt"
@@ -118,6 +124,7 @@ FORUM_ARGS=( --new-tag "$TAG" --json "$FORUM_JSON" --short-md "$RELEASE_NOTES" )
 [ -n "$NEW_TITLES" ] && FORUM_ARGS+=( --titles "$NEW_TITLES" )
 [ -s "$OLD_TITLES" ] && FORUM_ARGS+=( --prev-titles "$OLD_TITLES" )
 [ -f "$BLACKLIST" ] && FORUM_ARGS+=( --blacklist "$BLACKLIST" )
+[ -f "$AUTHORS_BLACKLIST" ] && FORUM_ARGS+=( --authors-blacklist "$AUTHORS_BLACKLIST" )
 [ -f "$VERSIONS_BLACKLIST" ] && FORUM_ARGS+=( --versions-blacklist "$VERSIONS_BLACKLIST" )
 [ -d "$EXPORTS_DIR" ] && FORUM_ARGS+=( --exports-dir "$EXPORTS_DIR" )
 python3 "$WORKDIR/generate_changelog.py" \
