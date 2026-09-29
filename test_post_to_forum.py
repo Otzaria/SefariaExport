@@ -231,6 +231,39 @@ class PostSelectionTest(unittest.TestCase):
         self.assertIn("topic 1617", out)
         self.assertIn("topic 1994", out)
 
+    def test_new_books_thread_is_never_written_without_new_books(self):
+        diff = self._diff(content_changed=[{"en": "Genesis", "he": "בראשית"}])
+        code, out = self._run(diff, [])
+        self.assertEqual(0, code)
+        self.assertIn("topic 1617", out)
+        self.assertNotIn("topic 1994", out)
+        self.assertNotIn("אין ספרים חדשים", out)
+
+    def test_changes_thread_is_never_written_without_changes(self):
+        diff = self._diff(added=[{"en": "X", "he": "ספר"}])
+        code, out = self._run(diff, [])
+        self.assertEqual(0, code)
+        self.assertIn("topic 1994", out)
+        self.assertNotIn("topic 1617", out)
+        self.assertNotIn("אין שינויים", out)
+
+    def test_a_book_no_longer_blacklisted_is_announced_with_its_old_name(self):
+        diff = self._diff(previously_blocked=[
+            {"en": "Kav HaYashar", "he": "ספר קב הישר", "old_en": "Kav HaYashar",
+             "old_he": "קב הישר", "reason": "title", "old_name": "קב הישר"},
+            {"en": "Other", "he": "אחר", "old_en": "Other", "old_he": "אחר",
+             "reason": "path", "old_name": "מוסר/אחר"}])
+        code, out = self._run(diff, ["--only", "new-books"])
+        self.assertEqual(0, code)
+        self.assertIn("topic 1994", out)
+        self.assertIn("ספר קב הישר — נחסם בעבר בשם «קב הישר»", out)
+        self.assertIn("אחר — נחסם בעבר בנתיב «מוסר/אחר»", out)
+
+    def test_release_posts_only_the_new_books_thread(self):
+        workflow = (Path(__file__).parent / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        command = next(line for line in workflow.splitlines() if "python3 post_to_forum.py" in line)
+        self.assertIn("--only new-books", command)
+
 
 class HebrewDateTest(unittest.TestCase):
     def test_an_explicit_day_is_honoured(self):

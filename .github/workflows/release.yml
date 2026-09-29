@@ -10,7 +10,7 @@ on:
         required: false
         default: Asia/Jerusalem
       post_to_forum:
-        description: Publish the display-only changelog to the Otzaria forum
+        description: Announce new books and new versions on the Otzaria forum
         type: boolean
         required: false
         default: true
@@ -75,7 +75,7 @@ jobs:
       - name: Validate release tooling
         run: |
           python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata
-          python3 -m unittest -v test_link_visibility.py test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_dead_letter_acknowledgements.py test_resolve_release_chain_head.py test_release_workflow_contract.py test_post_to_forum.py test_export_accounting.py
+          python3 -m unittest -v test_link_visibility.py test_release_contract.py test_downstream_intent.py test_reconcile_downstream.py test_dead_letter_acknowledgements.py test_resolve_release_chain_head.py test_release_workflow_contract.py test_post_to_forum.py test_generate_changelog.py test_export_accounting.py
 
       - name: Validate optional orchestration identity
         env:
@@ -367,7 +367,7 @@ jobs:
           tag_target="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
           [[ "$tag_target" == "$GITHUB_SHA" ]]
 
-      - name: Publish display-only changelog to forum
+      - name: Announce new books and new versions on the forum
         if: ${{ inputs.post_to_forum }}
         continue-on-error: true
         env:
@@ -375,7 +375,7 @@ jobs:
           PASSWORD: ${{ secrets.PASSWORD }}
           POST_TO_FORUM: "true"
           TAG: ${{ steps.release.outputs.tag }}
-        run: python3 post_to_forum.py forum_changelog_diff.json --tag "$TAG" --topic "${FORUM_TOPIC_ID:-1617}" --new-books-topic "${FORUM_NEW_BOOKS_TOPIC_ID:-1994}" --titles titles.json --prev-titles prev_titles.json
+        run: python3 post_to_forum.py forum_changelog_diff.json --tag "$TAG" --only new-books --new-books-topic "${FORUM_NEW_BOOKS_TOPIC_ID:-1994}" --titles titles.json --prev-titles prev_titles.json
 
       - name: Dispatch exact manual-link synchronization
         if: steps.previous.outputs.is_initial == 'false'

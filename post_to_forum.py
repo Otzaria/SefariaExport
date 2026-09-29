@@ -77,6 +77,19 @@ def version_lines(versions):
     return out
 
 
+def unblocked_lines(books):
+    """Books blacklisted only under their previous title/path, now importable."""
+    out = []
+    for b in books:
+        if b.get("reason") == "title":
+            out.append(f"{he_of(b)} — נחסם בעבר בשם «{b['old_name']}»")
+        elif b.get("reason") == "path":
+            out.append(f"{he_of(b)} — נחסם בעבר בנתיב «{b['old_name']}»")
+        else:
+            out.append(f"{he_of(b)} — נתיבו הקודם אינו ידוע, ייתכן שנחסם בעבר")
+    return sorted(out)
+
+
 def build_changes_post(diff, date):
     """'שינויים בספרים' post: renames, moves, content updates, removals."""
     books = diff.get("books", {})
@@ -96,28 +109,27 @@ def build_changes_post(diff, date):
         parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(content)}\n")
     if removed:
         parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed)}\n")
-    if not has_content:
-        parts.append("\nאין שינויים בספרים קיימים בעדכון זה.\n")
     return "".join(parts), has_content
 
 
 def build_new_books_post(diff, date):
-    """'ספרים חדשים' post: newly added books and new editions/versions."""
+    """'ספרים חדשים' post: newly added books, books no longer blacklisted, new versions."""
     books = diff.get("books", {})
     added = sorted({he_of(b) for b in books.get("added", [])})
+    unblocked = unblocked_lines(books.get("previously_blocked", []))
     versions = version_lines(diff.get("versions", {}).get("added", []))
 
-    has_content = bool(added or versions)
+    has_content = bool(added or unblocked or versions)
 
     parts = [f"# עדכון ספריית ספריא (Sefaria) — ספרים חדשים\n", f"**עדכון {date}**\n"]
     if added:
         parts.append(f"\n## ספרים חדשים:\n{bullets(added)}\n")
+    if unblocked:
+        parts.append(f"\n## ספרים שנחסמו בעבר בשם או בנתיב קודם ואינם חסומים עוד:\n{bullets(unblocked)}\n")
     if versions:
         # Pasteable `book | versionTitle` lines for triage into black_versions.txt.
         block = "\n".join(versions)
         parts.append(f"\n## גרסאות (מהדורות) חדשות:\n```\n{block}\n```\n")
-    if not has_content:
-        parts.append("\nאין ספרים חדשים בעדכון זה.\n")
     return "".join(parts), has_content
 
 
@@ -233,9 +245,9 @@ def main():
     footer = f"\n[להורדת העדכון](https://github.com/{repo}/releases/tag/{tag})\n" if (repo and tag) else ""
 
     posts = []
-    if args.only in ("both", "changes"):
+    if args.only in ("both", "changes") and has_changes:
         posts.append(("שינויים בספרים", args.topic, changes_text + footer))
-    if args.only in ("both", "new-books"):
+    if args.only in ("both", "new-books") and has_new_books:
         posts.append(("ספרים חדשים", args.new_books_topic, new_books_text + footer))
 
     # A re-publish asks for one specific thread; writing "nothing new" into it
