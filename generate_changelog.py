@@ -596,8 +596,8 @@ def main():
     # asset) instead of being pasted into the release notes.
     if args.short_md:
         _write(args.short_md, "\n".join(lines + [
-            "_Per-book detail is published to the Otzaria forum; the full list also ships "
-            "as the `CHANGELOG.md` asset of this release._",
+            "_New books and new versions are announced on the Otzaria forum; the full "
+            "per-book list ships as the `CHANGELOG.md` asset of this release._",
         ]))
         print(f"✅ Short release notes written: {args.short_md}")
 

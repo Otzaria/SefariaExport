@@ -239,6 +239,14 @@ class PostSelectionTest(unittest.TestCase):
         self.assertNotIn("topic 1994", out)
         self.assertNotIn("אין ספרים חדשים", out)
 
+    def test_changes_thread_is_never_written_without_changes(self):
+        diff = self._diff(added=[{"en": "X", "he": "ספר"}])
+        code, out = self._run(diff, [])
+        self.assertEqual(0, code)
+        self.assertIn("topic 1994", out)
+        self.assertNotIn("topic 1617", out)
+        self.assertNotIn("אין שינויים", out)
+
     def test_a_book_no_longer_blacklisted_is_announced_with_its_old_name(self):
         diff = self._diff(previously_blocked=[
             {"en": "Kav HaYashar", "he": "ספר קב הישר", "old_en": "Kav HaYashar",

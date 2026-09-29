@@ -109,8 +109,6 @@ def build_changes_post(diff, date):
         parts.append(f"\n## עודכנו/תוקנו הספרים הבאים:\n{bullets(content)}\n")
     if removed:
         parts.append(f"\n## הוסרו הספרים הבאים:\n{bullets(removed)}\n")
-    if not has_content:
-        parts.append("\nאין שינויים בספרים קיימים בעדכון זה.\n")
     return "".join(parts), has_content
 
 
@@ -247,7 +245,7 @@ def main():
     footer = f"\n[להורדת העדכון](https://github.com/{repo}/releases/tag/{tag})\n" if (repo and tag) else ""
 
     posts = []
-    if args.only in ("both", "changes"):
+    if args.only in ("both", "changes") and has_changes:
         posts.append(("שינויים בספרים", args.topic, changes_text + footer))
     if args.only in ("both", "new-books") and has_new_books:
         posts.append(("ספרים חדשים", args.new_books_topic, new_books_text + footer))

@@ -114,10 +114,10 @@ python3 "$WORKDIR/generate_changelog.py" \
 # A separately generated display copy may be filtered.  It is never consumed
 # by sync-manual-links and is not referenced from release_metadata.json.
 FORUM_JSON="$WORKDIR/forum_changelog_diff.json"
-# RELEASE_NOTES.md is the release body: counts only.  The per-book lists are
-# published to the forum, so the release page no longer carries hundreds of
-# lines of Markdown.  It is deliberately NOT a release asset — CHANGELOG.md
-# already ships the full display copy under the release contract.
+# RELEASE_NOTES.md is the release body: counts only.  The per-book lists ship
+# in CHANGELOG.md; the forum gets only new books and new versions.  It is
+# deliberately NOT a release asset — CHANGELOG.md already ships the full
+# display copy under the release contract.
 RELEASE_NOTES="$WORKDIR/RELEASE_NOTES.md"
 FORUM_ARGS=( --new-tag "$TAG" --json "$FORUM_JSON" --short-md "$RELEASE_NOTES" )
 [ -n "$PREV_TAG" ] && FORUM_ARGS+=( --old-tag "$PREV_TAG" )

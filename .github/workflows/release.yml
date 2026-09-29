@@ -10,7 +10,7 @@ on:
         required: false
         default: Asia/Jerusalem
       post_to_forum:
-        description: Publish the display-only changelog to the Otzaria forum
+        description: Announce new books and new versions on the Otzaria forum
         type: boolean
         required: false
         default: true
@@ -367,7 +367,7 @@ jobs:
           tag_target="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
           [[ "$tag_target" == "$GITHUB_SHA" ]]
 
-      - name: Publish display-only changelog to forum
+      - name: Announce new books and new versions on the forum
         if: ${{ inputs.post_to_forum }}
         continue-on-error: true
         env:
