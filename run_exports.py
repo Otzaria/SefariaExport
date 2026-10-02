@@ -716,16 +716,22 @@ def _side_mask(anchor, other, anchor_ref, perek_refs, parasha_refs) -> int:
 # `legacy_ref_data` has no entry for these indexes, and on a partial match it
 # returns the WHOLE BOOK, which would anchor the link to the wrong place.
 #
-# Each rule below was checked against the text, not guessed, and only earns
-# its place when the links it rescues do not already exist in the new form. A rule is tried
+# Each rule below was checked against the text, not guessed. A rule is tried
 # only after the original ref has failed, and the rewritten ref must still
 # parse, so a valid ref is never touched and a wrong rule cannot write a row.
+#
+# Sefaria's linkers have re-run since some of these schema changes, so a
+# rewritten pair can already exist as its own new-form link document. Such a
+# row is skipped (`legacy_duplicate`) whatever either row's type: writing it
+# would at best collapse into the existing link and at worst show the same
+# passage pair twice under two types.
 LegacyRefRule = namedtuple("LegacyRefRule", "name pattern replacement")
 
 LEGACY_REF_REWRITES = (
     # The "Seder Eliyahu Zuta" node became the index's untitled default node
     # (depth 2, Perek/Integer; one segment per chapter). 253 links still use the
-    # old node, 224 of them from mesorat_hashas.py (2018). Chapter numbering is
+    # old node, 224 of them from mesorat_hashas.py (2018); 19 of those 253 pairs
+    # already exist in the new form, so the rule adds 234. Chapter numbering is
     # unchanged: for 192 of 218 mesorat-hashas rows, chapter N shares a 5-word
     # run with the other side, against 17-27 for chapter N±1 or N±2.
     LegacyRefRule(
@@ -768,6 +774,15 @@ def parse_link_refs(refs, parse, error_cls):
             trefs.append(new_tref)
             rules.append(rule)
     return orefs, trefs, rules
+
+
+def new_form_link_exists(links, trefs) -> bool:
+    """Whether another link document already joins exactly these two refs.
+
+    One indexed lookup (Sefaria indexes `links.refs`) per rewritten row, which
+    is a few hundred per export. Order and type are ignored on purpose.
+    """
+    return links.find_one({"refs": {"$all": list(trefs)}}, {"_id": 1}) is not None
 
 
 _TRAILING_ADDRESS = re.compile(r"\s+[\d:ab.\-]+$")
@@ -949,8 +964,16 @@ def run_links_export_extended() -> dict:
             report_progress()
             continue
         if rules:
+            # Counted per link document: by_rule counts a document once per
+            # rule even when both of its sides were rewritten; `sides` counts
+            # the rewritten ref strings.
             field_counts["refs_rewritten"] += 1
-            rewritten_by_rule.update(rules)
+            field_counts["refs_rewritten_sides"] += len(rules)
+            rewritten_by_rule.update(set(rules))
+            if new_form_link_exists(db.links, (tref1, tref2)):
+                field_counts["legacy_duplicate"] += 1
+                report_progress()
+                continue
 
         char_level = link.get("charLevelData")
         char_cells = ["", ""]
@@ -1056,14 +1079,18 @@ def run_links_export_extended() -> dict:
     print(f"✅ links export done in {format_duration(ticker.elapsed)}: "
           f"links={seen} = written={field_counts['written']} "
           f"+ refs_unparsable={field_counts['refs_unparsable']} "
-          f"+ refs_malformed={field_counts['refs_malformed']}; "
+          f"+ refs_malformed={field_counts['refs_malformed']} "
+          f"+ legacy_duplicate={field_counts['legacy_duplicate']}; "
           f"charLevelData={field_counts['charLevelData']}, "
           f"malformed={field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
     timings = format_category_timings(cat_seconds, cat_rows)
     if timings:
         print(f"   slowest categories: {timings}")
     if field_counts["refs_rewritten"]:
-        print(f"   legacy refs rewritten on {field_counts['refs_rewritten']} links: "
+        print(f"   legacy refs rewritten on {field_counts['refs_rewritten']} links "
+              f"({field_counts['refs_rewritten_sides']} sides): written="
+              f"{field_counts['refs_rewritten'] - field_counts['legacy_duplicate']}, "
+              f"skipped_existing={field_counts['legacy_duplicate']}; by rule "
               + ", ".join(f"{k}={v}" for k, v in sorted(rewritten_by_rule.items())))
     if unparsable_refs:
         print("   unparsable by title: " + ", ".join(
@@ -1079,13 +1106,21 @@ def run_links_export_extended() -> dict:
             "written": field_counts["written"],
             "refs_unparsable": field_counts["refs_unparsable"],
             "refs_malformed": field_counts["refs_malformed"],
+            "legacy_duplicate": field_counts["legacy_duplicate"],
             "charLevelData": field_counts["charLevelData"],
             "charLevelData_malformed": field_counts["charLevelData_malformed"],
         },
-        # Rewritten links are part of `written`; kept out of ``counts`` so the
-        # identity links = written + refs_unparsable + refs_malformed holds.
+        # links = written + refs_unparsable + refs_malformed + legacy_duplicate.
+        # Every number here except `sides` counts link documents:
+        #   links = written + skipped_existing (skipped_existing is
+        #   counts.legacy_duplicate; written is already inside counts.written),
+        #   by_rule = documents with at least one side rewritten by that rule,
+        #   sides = rewritten ref strings (a document can contribute two).
         "legacy_ref_rewrites": {
             "links": field_counts["refs_rewritten"],
+            "written": field_counts["refs_rewritten"] - field_counts["legacy_duplicate"],
+            "skipped_existing": field_counts["legacy_duplicate"],
+            "sides": field_counts["refs_rewritten_sides"],
             "by_rule": dict(sorted(rewritten_by_rule.items())),
         },
         "unparsable_by_title": dict(unparsable_by_title.most_common()),

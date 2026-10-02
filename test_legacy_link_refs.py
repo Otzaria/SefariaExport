@@ -23,6 +23,7 @@ from unittest import mock
 
 import run_exports
 from run_exports import (
+    new_form_link_exists,
     parse_link_refs,
     rewrite_legacy_ref,
     unparsable_ref_title,
@@ -30,6 +31,9 @@ from run_exports import (
 
 ZUTA_OLD = "Tanna DeBei Eliyahu Zuta, Seder Eliyahu Zuta 4:1"
 ZUTA_NEW = "Tanna DeBei Eliyahu Zuta 4:1"
+ZUTA_OLD_1 = "Tanna DeBei Eliyahu Zuta, Seder Eliyahu Zuta 1:1"
+ZUTA_NEW_1 = "Tanna DeBei Eliyahu Zuta 1:1"
+RULE = "tanna_debei_eliyahu_zuta_default_node"
 
 
 class StubInputError(Exception):
@@ -145,6 +149,30 @@ class FakeLinks:
 
         return Cursor()
 
+    def find_one(self, query, projection=None):
+        wanted = query["refs"]["$all"]
+        for d in self._docs:
+            if all(r in d["refs"] for r in wanted):
+                return {"_id": d["_id"]}
+        return None
+
+
+class NewFormLinkExistsTest(unittest.TestCase):
+    LINKS = FakeLinks([
+        {"_id": 1, "refs": ["Genesis 1:1", ZUTA_NEW_1], "type": ""},
+        {"_id": 2, "refs": ["Vayikra Rabbah 9:3", ZUTA_OLD], "type": "mesorat hashas"},
+    ])
+
+    def test_an_existing_pair_is_found_in_either_order(self):
+        self.assertTrue(new_form_link_exists(self.LINKS, ("Genesis 1:1", ZUTA_NEW_1)))
+        self.assertTrue(new_form_link_exists(self.LINKS, (ZUTA_NEW_1, "Genesis 1:1")))
+
+    def test_the_legacy_document_itself_does_not_count(self):
+        self.assertFalse(new_form_link_exists(self.LINKS, ("Vayikra Rabbah 9:3", ZUTA_NEW)))
+
+    def test_one_shared_side_is_not_enough(self):
+        self.assertFalse(new_form_link_exists(self.LINKS, ("Genesis 1:1", ZUTA_NEW)))
+
 
 def unicodecsv_shim():
     """`unicodecsv.writer` over a binary file - all the exporter uses."""
@@ -165,9 +193,14 @@ def unicodecsv_shim():
 
 class LinksLoopTest(unittest.TestCase):
     DOCS = [
+        # New pair: rewritten and written.
         {"_id": 1, "refs": ["Vayikra Rabbah 9:3", ZUTA_OLD], "type": "mesorat hashas"},
-        {"_id": 2, "refs": ["Genesis 1:1", "Tanna DeBei Eliyahu Zuta 1:1"], "type": ""},
-        {"_id": 3, "refs": ["Vayikra Rabbah 9:3", "Tanna DeBei Eliyahu Zuta, Seder Eliyahu Zuta 1:1"], "type": "mesorat hashas"},
+        # A new-form link, and the same pair again in the old form, reversed
+        # and with another type: the legacy copy must be skipped.
+        {"_id": 2, "refs": ["Genesis 1:1", ZUTA_NEW_1], "type": ""},
+        {"_id": 3, "refs": [ZUTA_OLD_1, "Genesis 1:1"], "type": "mesorat hashas"},
+        # Both sides legacy: one document, two sides, one rule.
+        {"_id": 6, "refs": [ZUTA_OLD_1, ZUTA_OLD], "type": "mesorat hashas"},
         {"_id": 4, "refs": ["A Dictionary of the Talmud, אַלּוֹאין 1", "Genesis 1:1"], "type": ""},
         {"_id": 5, "refs": ["Pesachim 36a", "Shulchan Aruch HaRav 1:1:3"], "type": ""},
     ]
@@ -214,26 +247,44 @@ class LinksLoopTest(unittest.TestCase):
 
     def test_the_identity_still_holds(self):
         c = self.stats["counts"]
-        self.assertEqual(self.stats["links"], 5)
+        self.assertEqual(self.stats["links"], 6)
         self.assertEqual(c["written"], 3)
         self.assertEqual(c["refs_unparsable"], 2)
-        self.assertEqual(self.stats["links"], c["written"] + c["refs_unparsable"] + c["refs_malformed"])
+        self.assertEqual(c["legacy_duplicate"], 1)
+        self.assertEqual(self.stats["links"], c["written"] + c["refs_unparsable"]
+                         + c["refs_malformed"] + c["legacy_duplicate"])
+        self.assertEqual(len(self.rows), c["written"])
+        self.assertIn("+ legacy_duplicate=1;", self.log)
+
+    def test_a_legacy_row_already_present_in_the_new_form_is_skipped_whatever_its_type(self):
+        genesis = [r for r in self.rows if "Genesis 1:1" in (r[0], r[1])]
+        self.assertEqual(len(genesis), 1)
+        self.assertEqual((genesis[0][0], genesis[0][1], genesis[0][2]),
+                         ("Genesis 1:1", ZUTA_NEW_1, ""))
 
     def test_the_csv_carries_the_rewritten_refs(self):
         pairs = {(r[0], r[1]) for r in self.rows}
         self.assertIn(("Vayikra Rabbah 9:3", ZUTA_NEW), pairs)
-        self.assertIn(("Vayikra Rabbah 9:3", "Tanna DeBei Eliyahu Zuta 1:1"), pairs)
-        self.assertIn(("Genesis 1:1", "Tanna DeBei Eliyahu Zuta 1:1"), pairs)
+        self.assertIn((ZUTA_NEW_1, ZUTA_NEW), pairs)
+        self.assertIn(("Genesis 1:1", ZUTA_NEW_1), pairs)
         self.assertFalse(any("Seder Eliyahu Zuta" in r[0] + r[1] for r in self.rows))
         zuta = next(r for r in self.rows if r[1] == ZUTA_NEW)
         self.assertEqual(zuta[4], "Tanna DeBei Eliyahu Zuta")
 
-    def test_rewrites_are_reported_by_rule(self):
-        self.assertEqual(self.stats["legacy_ref_rewrites"], {
-            "links": 2,
-            "by_rule": {"tanna_debei_eliyahu_zuta_default_node": 2},
+    def test_rewrites_count_documents_and_sides_separately(self):
+        r = self.stats["legacy_ref_rewrites"]
+        self.assertEqual(r, {
+            "links": 3,
+            "written": 2,
+            "skipped_existing": 1,
+            "sides": 4,
+            "by_rule": {RULE: 3},
         })
-        self.assertIn("legacy refs rewritten on 2 links", self.log)
+        self.assertEqual(r["links"], r["written"] + r["skipped_existing"])
+        self.assertEqual(r["skipped_existing"], self.stats["counts"]["legacy_duplicate"])
+        self.assertEqual(sum(r["by_rule"].values()), r["links"])  # one rule here
+        self.assertIn("legacy refs rewritten on 3 links (4 sides): written=2, "
+                      "skipped_existing=1", self.log)
 
     def test_every_unparsable_pair_is_named_and_grouped_by_the_failing_side(self):
         self.assertEqual(sorted(self.stats["names"]["refs_unparsable"]), sorted([
