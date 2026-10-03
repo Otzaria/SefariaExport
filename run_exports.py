@@ -708,6 +708,95 @@ def _side_mask(anchor, other, anchor_ref, perek_refs, parasha_refs) -> int:
     return mask
 
 
+# --- legacy link refs ----------------------------------------------------------
+#
+# Some link documents in Sefaria's mongo still use refs that predate a schema
+# change, so Ref() rejects them and the link used to be dropped. Sefaria's own
+# fallback (`Ref.instantiate_ref_with_legacy_parse_fallback`) does not help:
+# `legacy_ref_data` has no entry for these indexes, and on a partial match it
+# returns the WHOLE BOOK, which would anchor the link to the wrong place.
+#
+# Each rule below was checked against the text, not guessed. A rule is tried
+# only after the original ref has failed, and the rewritten ref must still
+# parse, so a valid ref is never touched and a wrong rule cannot write a row.
+#
+# Sefaria's linkers have re-run since some of these schema changes, so a
+# rewritten pair can already exist as its own new-form link document. Such a
+# row is skipped (`legacy_duplicate`) whatever either row's type: writing it
+# would at best collapse into the existing link and at worst show the same
+# passage pair twice under two types.
+LegacyRefRule = namedtuple("LegacyRefRule", "name pattern replacement")
+
+LEGACY_REF_REWRITES = (
+    # The "Seder Eliyahu Zuta" node became the index's untitled default node
+    # (depth 2, Perek/Integer; one segment per chapter). 253 links still use the
+    # old node, 224 of them from mesorat_hashas.py (2018); 19 of those 253 pairs
+    # already exist in the new form, so the rule adds 234. Chapter numbering is
+    # unchanged: for 192 of 218 mesorat-hashas rows, chapter N shares a 5-word
+    # run with the other side, against 17-27 for chapter N±1 or N±2.
+    LegacyRefRule(
+        "tanna_debei_eliyahu_zuta_default_node",
+        re.compile(r"^Tanna DeBei Eliyahu Zuta, Seder Eliyahu Zuta (?=\d)"),
+        "Tanna DeBei Eliyahu Zuta ",
+    ),
+)
+
+
+def rewrite_legacy_ref(tref):
+    """Return `(new_tref, rule_name)` for a known legacy ref, else None."""
+    if not isinstance(tref, str):
+        return None
+    for rule in LEGACY_REF_REWRITES:
+        new_tref, n = rule.pattern.subn(rule.replacement, tref, count=1)
+        if n:
+            return new_tref, rule.name
+    return None
+
+
+def parse_link_refs(refs, parse, error_cls):
+    """Parse both sides of a link, retrying a failed side with a legacy rewrite.
+
+    Returns `(orefs, trefs, rules)`: the parsed Refs, the ref strings to write
+    (rewritten where a rule applied) and the names of the rules used. Raises
+    `error_cls` when a side fails and no rule rescues it.
+    """
+    orefs, trefs, rules = [], [], []
+    for tref in refs[:2]:
+        try:
+            orefs.append(parse(tref))
+            trefs.append(tref)
+        except error_cls:
+            rewritten = rewrite_legacy_ref(tref)
+            if rewritten is None:
+                raise
+            new_tref, rule = rewritten
+            orefs.append(parse(new_tref))
+            trefs.append(new_tref)
+            rules.append(rule)
+    return orefs, trefs, rules
+
+
+def new_form_link_exists(links, trefs) -> bool:
+    """Whether another link document already joins exactly these two refs.
+
+    One indexed lookup (Sefaria indexes `links.refs`) per rewritten row, which
+    is a few hundred per export. Order and type are ignored on purpose.
+    """
+    return links.find_one({"refs": {"$all": list(trefs)}}, {"_id": 1}) is not None
+
+
+_TRAILING_ADDRESS = re.compile(r"\s+[\d:ab.\-]+$")
+
+
+def unparsable_ref_title(tref) -> str:
+    """A grouping key for a ref Ref() rejected: the text before the first
+    comma, without a trailing address. Good enough to tell 'a shipped book lost
+    links' from '133 lexicon headwords' at a glance; not a real title lookup."""
+    if not isinstance(tref, str):
+        return repr(tref)
+    return _TRAILING_ADDRESS.sub("", tref.split(", ", 1)[0]) or tref
+
+
 def _sefaria_project_sha(project_dir=None) -> str:
     """The exact Sefaria-Project checkout whose helpers produced the masks."""
     import subprocess
@@ -786,6 +875,8 @@ def run_links_export_extended() -> dict:
     cat_seconds = Counter()
     cat_rows = Counter()
     unparsable_refs = []
+    unparsable_by_title = Counter()
+    rewritten_by_rule = Counter()
 
     path = os.path.join(export_base, "links")
     os.makedirs(path, exist_ok=True)
@@ -857,16 +948,32 @@ def run_links_export_extended() -> dict:
             continue
 
         try:
-            oref1 = Ref(refs[0])
-            oref2 = Ref(refs[1])
+            (oref1, oref2), (tref1, tref2), rules = parse_link_refs(refs, Ref, InputError)
         except InputError:
-            # Upstream drops these on the floor.  Keep the count (and the first
-            # few refs) so "the CSV is short" is answerable without a re-run.
+            # Upstream drops these on the floor.  Keep the count and every pair
+            # (a few hundred), grouped by the side that failed, so a shipped
+            # book losing links is not hidden behind alphabetically-first
+            # lexicon headwords.
             field_counts["refs_unparsable"] += 1
-            if len(unparsable_refs) < NAMES_IN_LOG:
-                unparsable_refs.append(f"{refs[0]} ↔ {refs[1]}")
+            unparsable_refs.append(f"{refs[0]} ↔ {refs[1]}")
+            for tref in refs[:2]:
+                try:
+                    parse_link_refs([tref], Ref, InputError)
+                except InputError:
+                    unparsable_by_title[unparsable_ref_title(tref)] += 1
             report_progress()
             continue
+        if rules:
+            # Counted per link document: by_rule counts a document once per
+            # rule even when both of its sides were rewritten; `sides` counts
+            # the rewritten ref strings.
+            field_counts["refs_rewritten"] += 1
+            field_counts["refs_rewritten_sides"] += len(rules)
+            rewritten_by_rule.update(set(rules))
+            if new_form_link_exists(db.links, (tref1, tref2)):
+                field_counts["legacy_duplicate"] += 1
+                report_progress()
+                continue
 
         char_level = link.get("charLevelData")
         char_cells = ["", ""]
@@ -879,8 +986,8 @@ def run_links_export_extended() -> dict:
 
         # Per-side visibility, decided here because this is the only place the
         # TermSet, index_node depths and both Refs exist together.
-        mask1 = _side_mask(oref1, oref2, refs[0], perek_refs, parasha_refs)
-        mask2 = _side_mask(oref2, oref1, refs[1], perek_refs, parasha_refs)
+        mask1 = _side_mask(oref1, oref2, tref1, perek_refs, parasha_refs)
+        mask2 = _side_mask(oref2, oref1, tref2, perek_refs, parasha_refs)
         for side, mask in ((1, mask1), (2, mask2)):
             if mask:
                 suppressed_sides[side] += 1
@@ -891,8 +998,8 @@ def run_links_export_extended() -> dict:
         link_type = link.get("type", "")
         category = oref1.index.categories[0]
         writer.writerow([
-            refs[0],
-            refs[1],
+            tref1,
+            tref2,
             link_type,
             oref1.book,
             oref2.book,
@@ -972,13 +1079,22 @@ def run_links_export_extended() -> dict:
     print(f"✅ links export done in {format_duration(ticker.elapsed)}: "
           f"links={seen} = written={field_counts['written']} "
           f"+ refs_unparsable={field_counts['refs_unparsable']} "
-          f"+ refs_malformed={field_counts['refs_malformed']}; "
+          f"+ refs_malformed={field_counts['refs_malformed']} "
+          f"+ legacy_duplicate={field_counts['legacy_duplicate']}; "
           f"charLevelData={field_counts['charLevelData']}, "
           f"malformed={field_counts['charLevelData_malformed'] + field_counts['refs_malformed']}")
     timings = format_category_timings(cat_seconds, cat_rows)
     if timings:
         print(f"   slowest categories: {timings}")
+    if field_counts["refs_rewritten"]:
+        print(f"   legacy refs rewritten on {field_counts['refs_rewritten']} links "
+              f"({field_counts['refs_rewritten_sides']} sides): written="
+              f"{field_counts['refs_rewritten'] - field_counts['legacy_duplicate']}, "
+              f"skipped_existing={field_counts['legacy_duplicate']}; by rule "
+              + ", ".join(f"{k}={v}" for k, v in sorted(rewritten_by_rule.items())))
     if unparsable_refs:
+        print("   unparsable by title: " + ", ".join(
+            f"{k}={v}" for k, v in unparsable_by_title.most_common(NAMES_IN_LOG)))
         print(format_named("unparsable refs", unparsable_refs))
     print(f"   visibility: sides suppressed 1={suppressed_sides[1]} 2={suppressed_sides[2]}, "
           f"by side/bit={dict(sorted(suppressed_by_side_and_bit.items()))}, "
@@ -990,9 +1106,24 @@ def run_links_export_extended() -> dict:
             "written": field_counts["written"],
             "refs_unparsable": field_counts["refs_unparsable"],
             "refs_malformed": field_counts["refs_malformed"],
+            "legacy_duplicate": field_counts["legacy_duplicate"],
             "charLevelData": field_counts["charLevelData"],
             "charLevelData_malformed": field_counts["charLevelData_malformed"],
         },
+        # links = written + refs_unparsable + refs_malformed + legacy_duplicate.
+        # Every number here except `sides` counts link documents:
+        #   links = written + skipped_existing (skipped_existing is
+        #   counts.legacy_duplicate; written is already inside counts.written),
+        #   by_rule = documents with at least one side rewritten by that rule,
+        #   sides = rewritten ref strings (a document can contribute two).
+        "legacy_ref_rewrites": {
+            "links": field_counts["refs_rewritten"],
+            "written": field_counts["refs_rewritten"] - field_counts["legacy_duplicate"],
+            "skipped_existing": field_counts["legacy_duplicate"],
+            "sides": field_counts["refs_rewritten_sides"],
+            "by_rule": dict(sorted(rewritten_by_rule.items())),
+        },
+        "unparsable_by_title": dict(unparsable_by_title.most_common()),
         "names": {"refs_unparsable": unparsable_refs},
     }
 
