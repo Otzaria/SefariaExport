@@ -154,6 +154,16 @@ Troubleshooting
 - `mongorestore` not found: re-run `03_install_mongo_tools.sh` or install MongoDB Database Tools from MongoDB’s official distribution.
 - Python build issues (e.g., `re2`): run `08_fallback_built_google_re2.sh` to build a compatible wheel as a fallback.
 - Exporter module not found: run `05_clone_sefaria_project.sh` and `07_pip_install_requirements.sh` again, then `13_check_export_module.sh`.
+- Links query plan rejected: `create_critical_indexes.py` checks the actual
+  `find().sort({"refs.0": 1})` plan after the upstream index creation pass.
+  Upstream can log an index creation error and return successfully, so a blocking
+  `SORT` now stops the pipeline before export. Inspect the earlier index errors
+  and the usable `refs.0` indexes; valid reverse and compound indexes are accepted.
+  The check uses `queryPlanner` with a 10-second server planning limit and does
+  not execute the export query to completion. Explain failures also stop the run.
+
+Stage measurements and the query-plan audit are recorded in
+[docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md).
 
 
 Project goals and scope
