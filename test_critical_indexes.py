@@ -24,9 +24,9 @@ class LinksQueryPlanTests(unittest.TestCase):
         db.command.return_value = explained(indexed_plan())
         result = verify_links_query_plan(db)
         db.command.assert_called_once_with({
-            "explain": {"find": "links", "filter": {}, "sort": {"refs.0": 1},
-                        "maxTimeMS": 10000},
+            "explain": {"find": "links", "filter": {}, "sort": {"refs.0": 1}},
             "verbosity": "queryPlanner",
+            "maxTimeMS": 10000,
         })
         db.links.find.assert_not_called()
         self.assertEqual(result, {"stages": ["FETCH", "IXSCAN"], "indexes": ["refs.0_1"]})

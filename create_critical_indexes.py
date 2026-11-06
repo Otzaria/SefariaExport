@@ -49,9 +49,11 @@ def verify_links_query_plan(db) -> dict:
             "find": "links",
             "filter": {},
             "sort": {"refs.0": 1},
-            "maxTimeMS": 10000,
         },
         "verbosity": "queryPlanner",
+        # MongoDB 6 ignores maxTimeMS inside the explained find command.
+        # Apply the deadline to the outer explain command instead.
+        "maxTimeMS": 10000,
     })
     planner = explained.get("queryPlanner") if isinstance(explained, dict) else None
     winning = planner.get("winningPlan") if isinstance(planner, dict) else None

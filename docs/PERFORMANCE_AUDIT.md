@@ -84,6 +84,27 @@ or a reason to add indexes. Live production `explain` output was not available
 during this audit; subsequent normal runs will verify and log the actual links
 plan after the index creation pass.
 
+### Explain deadline regression
+
+The 10-second `maxTimeMS` belongs on the outer `explain` command, alongside
+`verbosity`. MongoDB 6.0.29 ignores it when nested inside the explained `find`.
+This was reproduced with PyMongo 4.15.3 using the server's
+`maxTimeAlwaysTimeOut` failpoint: the nested form returned successfully while
+the outer form raised `ExecutionTimeout` (code 50). See MongoDB's
+[SERVER-127001](https://jira.mongodb.org/browse/SERVER-127001).
+
+An optional integration suite launches its own temporary localhost MongoDB
+with test commands enabled; it never connects to an existing database. It
+checks the production deadline with that failpoint and verifies real plans for
+missing, ascending, descending, and compound sort indexes. Run it with:
+
+```sh
+MONGOD_BINARY=/absolute/path/to/mongod python3 -m unittest -v test_critical_indexes_mongo.py
+```
+
+PyMongo must be installed in the test environment. Without `MONGOD_BINARY`,
+these integration tests are skipped; the regular mocked unit suite still runs.
+
 ## Regression checks
 
 ```sh
