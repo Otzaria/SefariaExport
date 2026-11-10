@@ -104,6 +104,11 @@ bash 15_verify_exports.sh
 bash 16_drop_db.sh
 ```
 
+11a) Bundle the referenced images (best effort; the library build reads `exports/textimages/` before it goes to the network)
+```
+bash 16a_fetch_textimages.sh
+```
+
 12) Build and post-process archives
 ```
 bash 17_build_combined_archive.sh
