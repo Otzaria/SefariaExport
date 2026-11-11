@@ -34,6 +34,7 @@ echo "Starting export pipeline..."
 ./15_verify_exports.sh
 ./15a_generate_manifest.sh
 ./16_drop_db.sh
+./16a_fetch_textimages.sh
 ./17_build_combined_archive.sh
 ./18_split_archive.sh
 
