@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """Download every textimages.sefaria.org image the export references into exports/textimages/.
 
-The consumer (SeforimLibrary's SefariaImageEmbedder) reads this directory
-before it touches the network, so its build host never has to reach Sefaria's
-image CDN. Layout, URL grammar and request encoding mirror that embedder:
+SeforimLibrary can embed these images directly from the export. Layout, URL
+grammar and request encoding mirror its SefariaImageEmbedder:
 `<sha256(url)>` holds the bytes, `<sha256(url)>.url` the URL that produced them.
 
-Best effort: a failed image is reported and left out (the consumer fetches it
-itself); it never fails the export.
+Individual image failures are reported and left out. Every run starts with
+an empty bundle so an earlier export cannot contribute stale files.
 """
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from PIL import Image, ImageSequence
 
 URL_MARKER = b"textimages.sefaria.org/"
 URL_RE = re.compile(
@@ -29,7 +33,11 @@ URL_RE = re.compile(
 TRAILING = " \\'\",.;)]}"
 REQUEST_UNSAFE = set(' "<>\\^`{|}')
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-ATTEMPTS = 3
+# A small compressed file can still be expensive to decode. Count all frames.
+MAX_IMAGE_PIXELS = 25_000_000
+RASTER_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
+RASTER_TRAILERS = {"PNG": bytes.fromhex("0000000049454e44ae426082"), "GIF": b";"}
+SVG_ROOTS = {"svg", "{http://www.w3.org/2000/svg}svg"}
 BACKOFF_SECONDS = (2, 6)
 PARALLELISM = 16
 USER_AGENT = "SefariaExport-textimages/1.0"
@@ -44,9 +52,11 @@ class FinalError(Exception):
     """A definitive answer; retrying only delays the run."""
 
 
-def collect_urls(json_dir: Path) -> list:
+def collect_urls(json_dir: Path) -> list[str]:
     urls = set()
-    for path in sorted(p for p in json_dir.rglob("*") if p.suffix.lower() == ".json"):
+    for path in json_dir.rglob("*"):
+        if path.suffix.lower() != ".json" or not path.is_file():
+            continue
         data = path.read_bytes()
         if URL_MARKER not in data:
             continue
@@ -67,16 +77,46 @@ def encode_for_request(url: str) -> str:
     return "".join(out)
 
 
-def rejection_reason(data: bytes):
-    if len(data) == 0:
+def rejection_reason(data: bytes) -> str | None:
+    if not data:
         return "empty"
     if len(data) > MAX_IMAGE_BYTES:
-        return "oversized (%d bytes)" % len(data)
-    head = data[:512].decode("utf-8", errors="replace").lstrip().lower()
-    if head.startswith("<!doctype html") or head.startswith("<html"):
-        return "html-instead-of-image"
+        return f"oversized ({len(data)} bytes)"
     if hashlib.sha256(data).hexdigest() in FILTER_PLACEHOLDER_SHA256:
         return "content-filter-placeholder"
+    head = data[:512].decode("utf-8-sig", errors="replace").lstrip().lower()
+    if head.startswith("<!doctype html") or head.startswith("<html"):
+        return "html-instead-of-image"
+    if head.startswith("<") or data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            root = ET.fromstring(data)
+        except (ET.ParseError, LookupError, ValueError):
+            return "invalid-svg-or-non-image"
+        return None if root.tag in SVG_ROOTS else "not-an-image"
+
+    try:
+        with Image.open(io.BytesIO(data), formats=RASTER_FORMATS) as image:
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                return "too-many-image-pixels"
+            # The decoder can render PNG/GIF pixels even if the file ends
+            # before the final PNG IEND chunk or GIF trailer.
+            trailer = RASTER_TRAILERS.get(image.format)
+            if trailer and not data.endswith(trailer):
+                return "incomplete-image"
+            # PNG's verify checks chunk integrity. Reopen to also check that
+            # the pixels decode, since verify is format-specific.
+            image.verify()
+        with Image.open(io.BytesIO(data), formats=RASTER_FORMATS) as image:
+            pixels = 0
+            for frame in ImageSequence.Iterator(image):
+                pixels += frame.width * frame.height
+                if pixels > MAX_IMAGE_PIXELS:
+                    return "too-many-image-pixels"
+                frame.load()
+    except Image.DecompressionBombError:
+        return "too-many-image-pixels"
+    except (OSError, SyntaxError, ValueError, EOFError):
+        return "invalid-or-unsupported-image"
     return None
 
 
@@ -86,26 +126,34 @@ def http_get(url: str) -> bytes:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read(MAX_IMAGE_BYTES + 1)
+            if response.status != 200:
+                raise FinalError(f"unexpected http {response.status}")
+            # http.client tracks the expected size only when Content-Length
+            # governs framing. Its bounded read may return early without raising.
+            expected = response.length
+            if expected is not None and expected > MAX_IMAGE_BYTES:
+                raise FinalError(f"oversized ({expected} bytes)")
+            data = response.read(MAX_IMAGE_BYTES + 1)
+            if expected is not None and len(data) != expected:
+                raise OSError(f"incomplete response ({len(data)}/{expected} bytes)")
+            return data
     except urllib.error.HTTPError as error:
-        retriable = error.code in (408, 429) or error.code >= 500
-        if retriable:
-            raise OSError("http %d" % error.code)
-        raise FinalError("http %d" % error.code)
+        error.close()
+        if error.code in (408, 429) or error.code >= 500:
+            raise OSError(f"http {error.code}") from error
+        raise FinalError(f"http {error.code}") from error
     except http.client.HTTPException as error:  # e.g. IncompleteRead: the connection dropped mid-body
-        raise OSError(str(error))
+        raise OSError(str(error)) from error
 
 
 def download(url: str, fetch=http_get, sleep=time.sleep) -> bytes:
-    for attempt in range(1, ATTEMPTS + 1):
+    for attempt in range(len(BACKOFF_SECONDS) + 1):
         try:
             return fetch(url)
-        except FinalError:
-            raise
         except OSError:
-            if attempt == ATTEMPTS:
+            if attempt == len(BACKOFF_SECONDS):
                 raise
-            sleep(BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)])
+            sleep(BACKOFF_SECONDS[attempt])
     raise AssertionError("unreachable")
 
 
@@ -123,15 +171,15 @@ def atomic_write(directory: Path, target: Path, data: bytes) -> None:
         raise
 
 
-def fetch_one(url: str, out_dir: Path, fetch, sleep):
+def fetch_one(url: str, out_dir: Path, fetch, sleep) -> str | None:
     """Returns None on success, else the reason the image is left out."""
     name = cache_name(url)
     try:
         data = download(url, fetch=fetch, sleep=sleep)
     except FinalError as error:
         return str(error)
-    except Exception as error:  # timeouts, resets, exhausted retries
-        return "%s: %s" % (type(error).__name__, error)
+    except (OSError, ValueError) as error:
+        return f"{type(error).__name__}: {error}"
     reason = rejection_reason(data)
     if reason:
         return reason
@@ -139,39 +187,50 @@ def fetch_one(url: str, out_dir: Path, fetch, sleep):
         atomic_write(out_dir, out_dir / (name + ".url"), url.encode("utf-8"))
         atomic_write(out_dir, out_dir / name, data)
     except OSError as error:
-        return "write failed: %s" % error
+        return f"write failed: {error}"
     return None
 
 
 def run(exports_dir: Path, fetch=http_get, sleep=time.sleep) -> dict:
-    json_dir = exports_dir / "json"
-    if not json_dir.is_dir():
-        raise FileNotFoundError("missing %s" % json_dir)
-    urls = collect_urls(json_dir)
     out_dir = exports_dir / "textimages"
-    out_dir.mkdir(exist_ok=True)
+    # Clear before scanning, including when the scan fails. The packager tars
+    # the entire tree, so an inability to clear stale files must stop it.
+    try:
+        shutil.rmtree(out_dir)
+    except FileNotFoundError:
+        pass
+    out_dir.mkdir(parents=True)
+
+    json_dir = exports_dir / "json"
+    try:
+        if not json_dir.is_dir():
+            raise FileNotFoundError(f"missing {json_dir}")
+        urls = collect_urls(json_dir)
+    except OSError as error:
+        return {"attempted": 0, "stored": 0, "failures": [], "scan_error": str(error)}
+
     with ThreadPoolExecutor(max_workers=PARALLELISM) as pool:
-        results = list(pool.map(lambda u: (u, fetch_one(u, out_dir, fetch, sleep)), urls))
-    failures = [{"url": u, "reason": r} for u, r in results if r]
+        results = pool.map(lambda url: fetch_one(url, out_dir, fetch, sleep), urls)
+        failures = [{"url": url, "reason": reason} for url, reason in zip(urls, results) if reason]
     return {"attempted": len(urls), "stored": len(urls) - len(failures), "failures": failures}
 
 
 def main() -> int:
-    exports = Path(os.environ.get("SEFARIA_EXPORT_PATH") or Path.cwd() / "exports")
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd())
+    exports = Path(os.environ.get("SEFARIA_EXPORT_PATH") or workspace / "exports")
+    report_path = exports / "metadata" / "textimages_report.json"
+    report_path.unlink(missing_ok=True)
+    report = run(exports)
     try:
-        report = run(exports)
-        out_dir = Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd()) / "output"
-        out_dir.mkdir(exist_ok=True)
-        (out_dir / "textimages_report.json").write_text(
-            json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
-        )
-    except Exception as error:  # best effort: the consumer downloads whatever is missing
-        print("::warning::textimages step skipped: %s: %s" % (type(error).__name__, error))
-        return 0
-    print("textimages: attempted=%d stored=%d failed=%d"
-          % (report["attempted"], report["stored"], len(report["failures"])))
+        report_path.parent.mkdir(exist_ok=True)
+        atomic_write(report_path.parent, report_path, json.dumps(report, indent=2, sort_keys=True).encode("utf-8"))
+    except OSError as error:
+        print(f"::warning::could not write textimages report: {error}")
+    if "scan_error" in report:
+        print(f"::warning::could not scan textimages: {report['scan_error']}")
+    print(f"textimages: attempted={report['attempted']} stored={report['stored']} failed={len(report['failures'])}")
     for failure in report["failures"]:
-        print("::warning::textimage not bundled (%s): %s" % (failure["reason"], failure["url"]))
+        print(f"::warning::textimage not bundled ({failure['reason']}): {failure['url']}")
     return 0
 
 

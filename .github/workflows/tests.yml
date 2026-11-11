@@ -14,10 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The forum client is imported by test_post_to_forum.py, so its runtime
-      # dependencies have to exist before the suite runs.
+      # The suite imports the forum client and the image validator.
       - name: Install test dependencies
-        run: python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata
+        run: python3 -m pip install --quiet requests beautifulsoup4 pyluach tzdata pillow
 
       - name: Run exporter and release-tool tests
         run: python3 -m unittest discover -v

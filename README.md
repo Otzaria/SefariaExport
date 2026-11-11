@@ -104,7 +104,7 @@ bash 15_verify_exports.sh
 bash 16_drop_db.sh
 ```
 
-11a) Bundle the referenced images (best effort; the library build reads `exports/textimages/` before it goes to the network)
+11a) Bundle the referenced images for the library build. This replaces `exports/textimages/` on each run and uses Pillow from step 6 to validate raster images. Each image is limited to 5 MiB and, for raster images, 25 million pixels across all frames. Failed downloads are omitted and recorded in `exports/metadata/textimages_report.json` inside the archive. The image files and report are excluded from the book changelog.
 ```
 bash 16a_fetch_textimages.sh
 ```

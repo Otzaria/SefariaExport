@@ -15,7 +15,9 @@ fi
 
 echo "🔢 Hashing files under $EXPORTS_DIR ..."
 # Sort first (NUL-safe) for a deterministic manifest.
-( cd "$EXPORTS_DIR" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$MANIFEST"
+# A reused workspace can still contain the previous image bundle and report.
+( cd "$EXPORTS_DIR" && find . \( -path ./textimages -o -path ./metadata/textimages_report.json \) -prune \
+    -o -type f -print0 | sort -z | xargs -0 sha256sum ) > "$MANIFEST"
 
 LINES=$(wc -l < "$MANIFEST")
 SIZE=$(du -h "$MANIFEST" | cut -f1)

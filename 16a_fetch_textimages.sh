@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bundle the images the export references (exports/textimages/), so the library
-# build never needs to reach textimages.sefaria.org. Runs after the manifest so
-# the manifest/changelog diff stays about book content. Best effort.
+# Bundle referenced images for the library build. Image failures are recorded
+# in exports/metadata/textimages_report.json and kept out of the changelog.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${GITHUB_WORKSPACE:-$PWD}"
 python3 "$SCRIPT_DIR/16a_fetch_textimages.py"
