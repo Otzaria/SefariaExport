@@ -92,9 +92,9 @@ def load_acknowledgements(path: Path = ACKNOWLEDGEMENT_FILE) -> dict[str, DeadLe
     """Read the committed acknowledgement store, or fail closed.
 
     A missing, unreadable, or malformed store is a hard error and never an empty
-    acknowledgement set.  Degrading to "nothing is acknowledged" would silently
-    restore the ~650 identical ``::warning::`` lines this file exists to remove,
-    and the store would rot without anyone noticing; degrading the other way
+    acknowledgement set.  Degrading to "nothing is acknowledged" would fail
+    every tick on dead letters already handled, for a reason nobody can see
+    in the store; degrading the other way
     would hide a genuinely new dead letter.  Neither is acceptable, so the
     reconciler refuses to run on a store it cannot parse.
     """
@@ -524,11 +524,8 @@ def main(argv: list[str] | None = None) -> int:
                 bucket = result.split(":", 1)[0]
                 counts[bucket] = counts.get(bucket, 0) + 1
             except ExhaustedIntent as exc:
-                # A scheduled full-store scan has already reported this root's
-                # bounded failures through the root runs themselves.  Treat it
-                # as a dead-letter terminal state so every future timer tick
-                # does not send another identical failure notification.  An
-                # operator targeting the exact tag still gets a hard failure.
+                # Terminal in the scan: never rerun again.  Unacknowledged, it
+                # fails the scan below until recovered or acknowledged.
                 if args.tag:
                     failures.append(f"{release.tag}: {exc}")
                     print(f"::error::{release.tag}: {exc}", file=sys.stderr)
@@ -536,12 +533,12 @@ def main(argv: list[str] | None = None) -> int:
                 entry = acknowledgements.get(release.tag)
                 # Exact identity, never a prefix: the tombstone is bound to the
                 # one root that went terminal, so a different root under the
-                # same tag stays a new dead letter and keeps its ::warning::.
+                # same tag stays a new dead letter and keeps failing the scan.
                 if entry is not None and entry.root_run_id == exc.root_run_id:
                     acknowledged.append(entry)
                 else:
                     new_dead_letters += 1
-                    print(f"::warning::{release.tag}: terminal dead letter: {exc}")
+                    print(f"::error::{release.tag}: terminal dead letter: {exc}")
             except (ContractError, ReconcileError, OSError) as exc:
                 failures.append(f"{release.tag}: {exc}")
                 print(f"::error::{release.tag}: {exc}", file=sys.stderr)
@@ -549,6 +546,11 @@ def main(argv: list[str] | None = None) -> int:
             report_scan(acknowledgements, acknowledged, counts, new_dead_letters, failures)
         if failures:
             raise ReconcileError(f"{len(failures)} downstream intent(s) failed reconciliation")
+        if new_dead_letters:
+            raise ReconcileError(
+                f"{new_dead_letters} unacknowledged terminal dead letter(s); recover the "
+                f"release or acknowledge its root in {ACKNOWLEDGEMENT_FILE.name}"
+            )
         return 0
     except (ContractError, ReconcileError, OSError) as exc:
         print(f"downstream reconciliation error: {exc}", file=sys.stderr)

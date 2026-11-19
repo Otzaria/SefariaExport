@@ -161,13 +161,13 @@ class ReconcileDownstreamTest(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             result = reconciler.main(["--source-repo", "Otzaria/SefariaExport"])
-        self.assertEqual(0, result)
+        self.assertEqual(1, result)
         self.assertIn(
-            f"::warning::{release.tag}: terminal dead letter: "
+            f"::error::{release.tag}: terminal dead letter: "
             "root 987 exhausted 3 attempts (failure)",
             stdout.getvalue(),
         )
-        self.assertEqual("", stderr.getvalue())
+        self.assertIn("1 unacknowledged terminal dead letter(s)", stderr.getvalue())
 
         stdout = io.StringIO()
         stderr = io.StringIO()

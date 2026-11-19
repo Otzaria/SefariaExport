@@ -5,7 +5,7 @@ clear, so the scheduled reconciler raised the same `::warning::` on the order
 of 650 times (653 scheduled runs of reconcile-downstream.yml between that root
 and 2026-09-07; GitHub throttles the `7,37 * * * *` cron to roughly 17 ticks a
 day, not the nominal 48).  Permanent noise masks a *new* dead letter beside it,
-which is the only thing the annotation exists to surface.  These tests pin the
+which is the only thing the scan exists to surface (now a hard failure).  These tests pin the
 acknowledgement store's exact-match semantics, its fail-closed parsing, and the
 one summary line that distinguishes acknowledged from new.
 """
@@ -87,18 +87,23 @@ class DeadLetterReportingTest(unittest.TestCase):
             code = reconciler.main(["--source-repo", SOURCE_REPO, *argv])
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_unacknowledged_terminal_dead_letter_still_warns(self):
+    def test_unacknowledged_terminal_dead_letter_fails_the_scan(self):
+        """19/11: a new dead letter as a ::warning:: in a green run went unseen."""
         release = make_release(30558924132)
         code, out, err = self.scan([release], [exhausted(release, ACKNOWLEDGED_ROOT)], {})
-        self.assertEqual(0, code)
+        self.assertEqual(1, code)
         self.assertIn(
-            f"::warning::{release.tag}: terminal dead letter: "
+            f"::error::{release.tag}: terminal dead letter: "
             f"root {ACKNOWLEDGED_ROOT} exhausted 3 attempts (failure)",
             out,
         )
         self.assertNotIn("::notice::", out)
         self.assertIn("terminal=1 (acknowledged=0, new=1)", out)
-        self.assertEqual("", err)
+        self.assertIn(
+            "1 unacknowledged terminal dead letter(s); recover the release or "
+            "acknowledge its root in acknowledged_dead_letters.json",
+            err,
+        )
 
     def test_acknowledged_terminal_dead_letter_reports_once_and_never_warns(self):
         release = make_release(30558924132)
@@ -155,8 +160,8 @@ class DeadLetterReportingTest(unittest.TestCase):
         code, out, _ = self.scan(
             [prefixed], [exhausted(prefixed, ACKNOWLEDGED_ROOT)], {ACKNOWLEDGED_TAG: acknowledgement()}
         )
-        self.assertEqual(0, code)
-        self.assertIn(f"::warning::{prefixed.tag}: terminal dead letter:", out)
+        self.assertEqual(1, code)
+        self.assertIn(f"::error::{prefixed.tag}: terminal dead letter:", out)
         self.assertIn(f"::warning::stale acknowledgement: {ACKNOWLEDGED_TAG}", out)
         self.assertIn("terminal=1 (acknowledged=0, new=1)", out)
 
@@ -166,8 +171,8 @@ class DeadLetterReportingTest(unittest.TestCase):
             [exhausted(release, ACKNOWLEDGED_ROOT + 1)],
             {release.tag: acknowledgement(tag=release.tag)},
         )
-        self.assertEqual(0, code)
-        self.assertIn(f"::warning::{release.tag}: terminal dead letter:", out)
+        self.assertEqual(1, code)
+        self.assertIn(f"::error::{release.tag}: terminal dead letter:", out)
         self.assertIn(f"::warning::stale acknowledgement: {release.tag}", out)
         self.assertIn("terminal=1 (acknowledged=0, new=1)", out)
         self.assertNotIn("::notice::", out)
